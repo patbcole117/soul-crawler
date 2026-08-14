@@ -1,17 +1,26 @@
-import { DUNGEONS, FINAL_DUNGEON, dungeonHue } from './data.js';
+import { DUNGEONS, FINAL_DUNGEON, dungeonHue, RARITIES } from './data.js';
 import { GAME_TITLE, OPENING_SLIDES, ENDING_SLIDES, createParticleField } from './cutscenes.js';
+import { CLASSES, getClass } from './classes.js';
+import { getSpell, spellsForClass, MAX_RANK } from './spells.js';
 import {
-  newPlayer, maxStats, xpToNext, addXp, equipItem, unequipItem,
-  addItemToInventory, sellItem, clampHp, MAX_INVENTORY,
+  newPlayer, applyClass, maxStats, xpToNext, addXp, equipItem, unequipItem,
+  addItemToInventory, sellItem, clampHp, restoreFull, canLearnSpell, learnOrUpgradeSpell,
+  knownSpells, MAX_INVENTORY,
 } from './player.js';
-import { generateItem } from './items.js';
+import { generateItem, generateShopStock, buyPrice, pickRarityIndex } from './items.js';
 import { generateDungeon, tileAt, setTile, revealAround } from './dungeon.js';
-import { resolveRound, usePotion } from './combat.js';
+import { resolveRound, usePotion, newCombatState } from './combat.js';
 import { saveGame, loadGame, clearSave } from './save.js';
-import { barHTML, itemCardHTML, itemDetailHTML, paperdollHTML, tileGlyph } from './ui.js';
+import {
+  barHTML, itemCardHTML, itemDetailHTML, paperdollHTML, tileGlyph,
+  classCardHTML, classDetailHTML, spellButtonHTML, skillRowHTML, shopStockCardHTML,
+} from './ui.js';
+import { createVfxLayer, VFX_PRESETS, shakeEl, flashEl, spawnDamagePop } from './vfx.js';
 import { randInt, fmt } from './utils.js';
 
 const root = document.getElementById('app');
+const ENEMY_POS = [0.5, 0.26];
+const PLAYER_POS = [0.5, 0.8];
 
 const G = {
   player: null,
@@ -26,9 +35,12 @@ const G = {
   modal: null,
   toast: null,
   _toastTimer: null,
+  classPreview: null,
+  gamble: null,
 };
 
 function persist() {
+  if (!G.player) return;
   saveGame({ player: G.player, seenIntro: G.seenIntro, seenEnding: G.seenEnding });
 }
 
@@ -50,12 +62,20 @@ function goTown() {
   render();
 }
 
+function goClassSelect() {
+  G.screen = 'classSelect';
+  G.classPreview = null;
+  render();
+}
+
 // ---------- Dungeon flow ----------
 
 function enterDungeon(index, isFinal) {
   G.dungeon = generateDungeon(isFinal ? 30 : index, isFinal);
+  G.player.mana = maxStats(G.player).maxMana;
   G.screen = 'dungeon';
   G.selectedItemId = null;
+  persist();
   render();
 }
 
@@ -102,25 +122,34 @@ function handleGold(x, y) {
 function handleFountain(x, y) {
   const d = G.dungeon;
   setTile(d, x, y, 'floor');
-  G.player.hp = maxStats(G.player).maxHp;
+  restoreFull(G.player);
   toast('The fountain restores you fully.');
   persist();
+}
+
+function stopDungeonParticles() {
+  G.dungeon?.particles?.stop();
 }
 
 // ---------- Combat flow ----------
 
 function startCombat(enemy, pos) {
-  G.combat = { enemy, pos, log: [], auto: false, timer: null, result: null, locked: false };
+  stopDungeonParticles();
+  G.combat = {
+    enemy, pos, log: [], lastRoundLog: null, auto: false, timer: null,
+    result: null, locked: false, vfx: null, ...newCombatState(),
+  };
   G.screen = 'combat';
   render();
 }
 
-function doCombatRound() {
+function performRound(action) {
   const c = G.combat;
   if (!c || c.locked || c.enemy.hp <= 0) return;
   const p = G.player;
-  const res = resolveRound(p, c.enemy);
+  const res = resolveRound(p, c.enemy, c, action);
   c.log.push(...res.log);
+  c.lastRoundLog = res.log;
 
   if (res.enemyDefeated) {
     c.locked = true;
@@ -159,6 +188,25 @@ function doCombatRound() {
   render();
 }
 
+function castSpellAction(spellId) {
+  const c = G.combat;
+  if (!c || c.locked) return;
+  const spell = getSpell(spellId);
+  if (!spell) return;
+  const rank = G.player.spellRanks[spellId] || 0;
+  if (rank <= 0) return;
+  if ((c.cooldowns[spellId] || 0) > 0) { toast('That spell is on cooldown.'); return; }
+  if (G.player.mana < spell.manaCost) { toast('Not enough mana.'); return; }
+  if (spell.selfCostHpPct) {
+    const cost = Math.ceil(G.player.hp * spell.selfCostHpPct / 100);
+    if (G.player.hp - cost <= 0) { toast('Not enough HP for this spell.'); return; }
+    G.player.hp -= cost;
+  }
+  G.player.mana -= spell.manaCost;
+  c.cooldowns[spellId] = spell.cooldown;
+  performRound({ kind: 'spell', spell, rank });
+}
+
 function toggleAuto() {
   const c = G.combat;
   if (!c) return;
@@ -172,11 +220,13 @@ function toggleAuto() {
       const pstats = maxStats(G.player);
       if (G.player.hp < pstats.maxHp * 0.35 && G.player.potions > 0) {
         const healed = usePotion(G.player);
-        cc.log.push({ type: 'potion', heal: healed });
+        const entry = { type: 'potion', heal: healed };
+        cc.log.push(entry);
+        cc.lastRoundLog = [entry];
         render();
         return;
       }
-      doCombatRound();
+      performRound({ kind: 'attack' });
     }, 550);
   }
   render();
@@ -203,6 +253,7 @@ function finishCombat() {
     render();
   } else {
     G.combat = null;
+    stopDungeonParticles();
     G.dungeon = null;
     G.screen = 'town';
     persist();
@@ -214,6 +265,7 @@ function handleDungeonCleared(index) {
   const p = G.player;
   if (!p.clearedDungeons.includes(index)) p.clearedDungeons.push(index);
   p.unlockedDungeon = Math.max(p.unlockedDungeon, index + 1);
+  stopDungeonParticles();
   G.dungeon = null;
   persist();
   const allCleared = p.clearedDungeons.length >= 27;
@@ -227,6 +279,7 @@ function handleDungeonCleared(index) {
 
 function handleFinalCleared() {
   G.player.finalCleared = true;
+  stopDungeonParticles();
   G.dungeon = null;
   persist();
   startCutscene(ENDING_SLIDES, () => { G.seenEnding = true; persist(); goTown(); });
@@ -260,10 +313,46 @@ function endCutscene() {
   done?.();
 }
 
+// ---------- Shop helpers ----------
+
+function shopDepth(p) {
+  const cleared = p.clearedDungeons.length ? Math.max(...p.clearedDungeons) : 0;
+  return Math.max(1, cleared, p.unlockedDungeon - 1);
+}
+
+function wheelSegments() {
+  const total = RARITIES.reduce((a, r) => a + r.weight, 0);
+  let acc = 0;
+  return RARITIES.map(r => {
+    const start = acc / total * 360;
+    acc += r.weight;
+    const end = acc / total * 360;
+    return { key: r.key, color: r.color, start, end };
+  });
+}
+
+function wheelGradientCSS() {
+  const segs = wheelSegments();
+  return `conic-gradient(${segs.map(s => `${s.color} ${s.start}deg ${s.end}deg`).join(', ')})`;
+}
+
+function gambleWheelHTML() {
+  const g = G.gamble;
+  const rotation = g?.rotation || 0;
+  const spinning = g?.spinning;
+  return `<div class="gamble-wheel-wrap">
+    <div class="gamble-wheel-pointer">▼</div>
+    <div class="gamble-wheel" style="background:${wheelGradientCSS()}; transform:rotate(${rotation}deg); transition:${spinning ? 'transform 3.2s cubic-bezier(.15,.7,.25,1)' : 'none'}"></div>
+    <button class="btn btn-primary gamble-btn" data-action="gamble-spin" ${(G.player.gold < 100 || spinning) ? 'disabled' : ''}>🎡 Spin for 100g</button>
+    ${g?.resultItem ? `<div class="gamble-result">${itemCardHTML(g.resultItem, {})}<div class="drop-caption">The wheel favors you!</div></div>` : ''}
+  </div>`;
+}
+
 // ---------- Rendering ----------
 
 function render() {
   if (G.screen === 'cutscene') renderCutscene();
+  else if (G.screen === 'classSelect') renderClassSelect();
   else if (G.screen === 'town') renderTown();
   else if (G.screen === 'dungeon') renderDungeon();
   else if (G.screen === 'combat') renderCombat();
@@ -305,16 +394,35 @@ function renderCutscene() {
   cs.particles.start(slide.hue);
 }
 
+function renderClassSelect() {
+  const cls = G.classPreview ? getClass(G.classPreview) : null;
+  root.innerHTML = `
+  <div class="screen classselect-screen">
+    <div class="cs-header">
+      <div class="cs-title">Choose Your Path</div>
+      <div class="cs-sub">Every soul answers the call to war differently.</div>
+    </div>
+    <div class="cs-body">
+      <div class="cs-grid">${CLASSES.map(c => classCardHTML(c, c.key === G.classPreview)).join('')}</div>
+      <div class="cs-detail">${cls ? classDetailHTML(cls) : '<div class="cs-hint">Select a class to see its path.</div>'}</div>
+    </div>
+    <div class="cs-actions">
+      <button class="btn btn-primary" data-action="confirm-class" ${G.classPreview ? '' : 'disabled'}>Begin Your Journey</button>
+    </div>
+  </div>`;
+}
+
 function renderTown() {
   const p = G.player;
   const stats = maxStats(p);
   const xpNext = xpToNext(p.level);
+  const cls = getClass(p.classKey);
   root.innerHTML = `
   <div class="screen town-screen">
     <header class="topbar">
       <div class="title-mini">${GAME_TITLE}</div>
       <div class="player-brief">
-        <span class="pname">${p.name}</span>
+        <span class="pname">${cls.icon} ${p.name}</span>
         <span class="plevel">Lv ${p.level}</span>
         <span class="pgold">🪙 ${fmt(p.gold)}</span>
         <span class="ppotion">🧪 x${p.potions}</span>
@@ -323,8 +431,9 @@ function renderTown() {
     </header>
     <div class="town-body">
       <div class="panel char-panel">
-        <h3>${p.name}</h3>
+        <h3>${cls.icon} ${p.name} <span class="char-class-name">${cls.name}</span></h3>
         ${barHTML('hp', p.hp, stats.maxHp, `HP ${fmt(p.hp)} / ${fmt(stats.maxHp)}`)}
+        ${barHTML('mana', p.mana, stats.maxMana, `MP ${fmt(p.mana)} / ${fmt(stats.maxMana)}`)}
         ${barHTML('xp', p.xp, xpNext, `XP ${fmt(p.xp)} / ${fmt(xpNext)}`)}
         <div class="stat-grid">
           <div>Attack: ${fmt(stats.attack)}</div>
@@ -343,11 +452,13 @@ function renderTown() {
         <div class="tabs">
           <button class="tab ${G.townTab === 'dungeons' ? 'active' : ''}" data-action="town-tab" data-tab="dungeons">Dungeons</button>
           <button class="tab ${G.townTab === 'inventory' ? 'active' : ''}" data-action="town-tab" data-tab="inventory">Inventory (${p.inventory.length}/${MAX_INVENTORY})</button>
+          <button class="tab ${G.townTab === 'skills' ? 'active' : ''}" data-action="town-tab" data-tab="skills">Skills ${p.skillPoints > 0 ? `<span class="badge">${p.skillPoints}</span>` : ''}</button>
           <button class="tab ${G.townTab === 'shop' ? 'active' : ''}" data-action="town-tab" data-tab="shop">Shop</button>
         </div>
         <div class="tab-body">
           ${G.townTab === 'dungeons' ? renderDungeonList() : ''}
           ${G.townTab === 'inventory' ? renderInventoryTab() : ''}
+          ${G.townTab === 'skills' ? renderSkillsTab() : ''}
           ${G.townTab === 'shop' ? renderShopTab() : ''}
         </div>
       </div>
@@ -399,12 +510,39 @@ function renderInventoryTab() {
   return `<div class="inv-grid">${p.inventory.map(it => itemCardHTML(it, { selected: it.id === G.selectedItemId })).join('')}</div>`;
 }
 
+function renderSkillsTab() {
+  const p = G.player;
+  const spells = spellsForClass(p.classKey);
+  return `<div class="skills-panel">
+    <div class="skills-points">Skill Points Available: <b>${p.skillPoints || 0}</b></div>
+    ${spells.map(s => {
+      const rank = p.spellRanks[s.id] || 0;
+      const check = canLearnSpell(p, s.id);
+      const lockReason = check.ok ? '' : (rank > 0 || p.skillPoints > 0 ? check.reason : `Requires level ${s.levelReq}`);
+      return skillRowHTML(s, rank, check.ok, rank >= MAX_RANK ? '' : lockReason);
+    }).join('')}
+  </div>`;
+}
+
 function renderShopTab() {
-  const potionCost = 15;
+  const p = G.player;
+  if (!p.shop) { p.shop = { stock: generateShopStock(shopDepth(p)) }; persist(); }
+  const stock = p.shop.stock || [];
   return `<div class="shop-panel">
+    <div class="shop-section">
+      <div class="shop-section-title">Traveling Merchant <button class="btn btn-ghost" data-action="refresh-shop">🔄 Refresh (25g)</button></div>
+      <div class="inv-grid shop-stock-grid">
+        ${stock.length ? stock.map(it => shopStockCardHTML(it, p.gold)).join('') : '<div class="empty-note">Sold out. Refresh to restock.</div>'}
+      </div>
+    </div>
+    <div class="shop-section">
+      <div class="shop-section-title">Gambler's Wheel</div>
+      <div class="shop-note">Spend 100g to spin for a random item drawn from the deepest dungeon you've conquered.</div>
+      ${gambleWheelHTML()}
+    </div>
     <div class="shop-item">
       <div>🧪 Health Potion — heals 42% max HP mid-fight.</div>
-      <button class="btn btn-primary" data-action="buy-potion">Buy for ${potionCost}g</button>
+      <button class="btn btn-primary" data-action="buy-potion">Buy for 15g</button>
     </div>
     <div class="shop-item">
       <div>Sell all Common &amp; Uncommon junk in one click.</div>
@@ -430,8 +568,11 @@ function renderDungeon() {
       gridHTML += `<div class="${cls}" data-action="tile-click" data-x="${x}" data-y="${y}">${revealed ? (isPlayer ? '🧍' : tileGlyph(type)) : ''}</div>`;
     }
   }
+  const lightX = ((d.playerPos.x + 0.5) / d.size) * 100;
+  const lightY = ((d.playerPos.y + 0.5) / d.size) * 100;
   root.innerHTML = `
   <div class="screen dungeon-screen" style="--hue:${d.hue}">
+    <canvas id="dungeon-particles" class="particles-canvas dim"></canvas>
     <header class="topbar">
       <button class="btn btn-ghost" data-action="retreat">← Town</button>
       <div class="dungeon-title"><div>${d.name}</div><div class="dungeon-flavor">${d.flavor}</div></div>
@@ -441,7 +582,10 @@ function renderDungeon() {
       </div>
     </header>
     <div class="dungeon-wrap">
-      <div class="dungeon-grid" style="grid-template-columns:repeat(${d.size},1fr)">${gridHTML}</div>
+      <div class="dungeon-grid-frame">
+        <div class="dungeon-grid" style="grid-template-columns:repeat(${d.size},1fr)">${gridHTML}</div>
+        <div class="torchlight" style="background: radial-gradient(circle at ${lightX}% ${lightY}%, transparent 0%, transparent 16%, rgba(4,3,8,0.5) 42%, rgba(4,3,8,0.88) 72%)"></div>
+      </div>
     </div>
     <div class="dpad">
       <button class="btn dpad-up" data-action="move" data-dx="0" data-dy="-1">↑</button>
@@ -453,39 +597,155 @@ function renderDungeon() {
     </div>
     ${G.toast ? `<div class="toast">${G.toast}</div>` : ''}
   </div>`;
+  const canvas = document.getElementById('dungeon-particles');
+  if (canvas) {
+    d.particles?.stop();
+    d.particles = createParticleField(canvas);
+    d.particles.start(d.hue);
+  }
+}
+
+function enemyIcon(enemy) {
+  switch (enemy.kind) {
+    case 'boss': return '😈';
+    case 'final': return '👺';
+    case 'elite': return '💀';
+    default: return '👹';
+  }
+}
+
+function effectChipsHTML(c, side) {
+  const chips = [];
+  const effs = side === 'enemy' ? c.enemyEffects : c.playerEffects;
+  for (const e of effs) chips.push(`<span class="chip ${e.amount < 0 ? 'chip-bad' : 'chip-good'}">${e.label} (${e.turnsLeft})</span>`);
+  if (side === 'enemy') {
+    for (const t of c.enemyTicks) chips.push(`<span class="chip chip-bad">${t.label} (${t.turnsLeft})</span>`);
+    if (c.enemyStunTurns > 0) chips.push(`<span class="chip chip-bad">Stunned (${c.enemyStunTurns})</span>`);
+  } else {
+    if (c.playerShield > 0) chips.push(`<span class="chip chip-good">🛡 Shield ${c.playerShield}</span>`);
+  }
+  return chips.join('');
 }
 
 function renderCombat() {
   const c = G.combat;
   const p = G.player;
   const stats = maxStats(p);
+  const cls = getClass(p.classKey);
   const isBossy = c.enemy.kind === 'boss' || c.enemy.kind === 'final';
+  const known = knownSpells(p);
   root.innerHTML = `
-  <div class="screen combat-screen ${isBossy ? 'boss-fight' : ''}">
-    <div class="combat-enemy">
+  <div class="screen combat-screen ${isBossy ? 'boss-fight' : ''}" style="--hue:${G.dungeon?.hue ?? 0}">
+    <canvas id="vfx-canvas" class="vfx-canvas"></canvas>
+    <div class="combat-side enemy-side">
+      <div class="portrait enemy-portrait" id="enemy-portrait">
+        <div class="portrait-emoji">${enemyIcon(c.enemy)}</div>
+        <div class="portrait-dmg-layer" id="enemy-dmg-layer"></div>
+      </div>
       <div class="enemy-name">${c.enemy.name}${c.enemy.title ? `<div class="enemy-title">${c.enemy.title}</div>` : ''}</div>
       ${barHTML('enemy-hp', c.enemy.hp, c.enemy.maxHp, `${fmt(c.enemy.hp)} / ${fmt(c.enemy.maxHp)}`)}
+      <div class="effect-chips">${effectChipsHTML(c, 'enemy')}</div>
     </div>
     <div class="combat-log" id="combat-log">${c.log.slice(-8).map(renderLogLine).join('')}</div>
-    <div class="combat-player">
+    <div class="combat-side player-side">
+      <div class="portrait player-portrait" id="player-portrait">
+        <div class="portrait-emoji">${cls.icon}</div>
+        <div class="portrait-dmg-layer" id="player-dmg-layer"></div>
+      </div>
       ${barHTML('hp', p.hp, stats.maxHp, `HP ${fmt(p.hp)} / ${fmt(stats.maxHp)}`)}
+      ${barHTML('mana', p.mana, stats.maxMana, `MP ${fmt(p.mana)} / ${fmt(stats.maxMana)}`)}
+      <div class="effect-chips">${effectChipsHTML(c, 'player')}</div>
     </div>
-    ${c.result ? renderCombatResult(c) : `<div class="combat-actions">
-      <button class="btn btn-primary" data-action="combat-attack">⚔ Attack</button>
-      <button class="btn" data-action="combat-potion" ${p.potions <= 0 ? 'disabled' : ''}>🧪 Potion</button>
-      <button class="btn ${c.auto ? 'btn-active' : ''}" data-action="combat-auto">${c.auto ? '⏸ Stop Auto' : '▶ Auto'}</button>
-      <button class="btn btn-ghost" data-action="combat-flee">Flee</button>
-    </div>`}
+    ${c.result ? renderCombatResult(c) : `
+      ${known.length ? `<div class="spell-bar">${known.map(s => spellButtonHTML(s, p.spellRanks[s.id] || 0, c.cooldowns[s.id] || 0, p.mana)).join('')}</div>` : ''}
+      <div class="combat-actions">
+        <button class="btn btn-primary" data-action="combat-attack">⚔ Attack</button>
+        <button class="btn" data-action="combat-potion" ${p.potions <= 0 ? 'disabled' : ''}>🧪 Potion</button>
+        <button class="btn ${c.auto ? 'btn-active' : ''}" data-action="combat-auto">${c.auto ? '⏸ Stop Auto' : '▶ Auto'}</button>
+        <button class="btn btn-ghost" data-action="combat-flee">Flee</button>
+      </div>`}
   </div>`;
   const logEl = document.getElementById('combat-log');
   if (logEl) logEl.scrollTop = logEl.scrollHeight;
+
+  const canvas = document.getElementById('vfx-canvas');
+  if (canvas) {
+    const vfx = createVfxLayer(canvas);
+    if (c.lastRoundLog) {
+      runCombatVfx(vfx, c.lastRoundLog);
+      c.lastRoundLog = null;
+    }
+  }
+}
+
+function runCombatVfx(vfx, entries) {
+  const enemyPortrait = document.getElementById('enemy-portrait');
+  const playerPortrait = document.getElementById('player-portrait');
+  const enemyDmgLayer = document.getElementById('enemy-dmg-layer');
+  const playerDmgLayer = document.getElementById('player-dmg-layer');
+  const screenEl = document.querySelector('.combat-screen');
+  for (const e of entries) {
+    switch (e.type) {
+      case 'player':
+        vfx.burst(ENEMY_POS[0], ENEMY_POS[1], VFX_PRESETS['attack-white']);
+        shakeEl(enemyPortrait, 'sm'); flashEl(enemyPortrait, 'flash-hit');
+        spawnDamagePop(enemyDmgLayer, e.crit ? `${e.dmg}!` : `${e.dmg}`, e.crit ? 'crit' : 'normal');
+        break;
+      case 'spellDamage': {
+        const preset = VFX_PRESETS[e.spell.vfx] || VFX_PRESETS['attack-white'];
+        vfx.burst(ENEMY_POS[0], ENEMY_POS[1], preset);
+        shakeEl(enemyPortrait, e.crit ? 'lg' : 'md'); flashEl(enemyPortrait, 'flash-hit');
+        spawnDamagePop(enemyDmgLayer, e.crit ? `${e.dmg}!` : `${e.dmg}`, e.crit ? 'crit' : 'spell');
+        break;
+      }
+      case 'dotTick':
+        vfx.burst(ENEMY_POS[0], ENEMY_POS[1], VFX_PRESETS['poison-purple']);
+        spawnDamagePop(enemyDmgLayer, `${e.dmg}`, 'dot');
+        break;
+      case 'enemy':
+        vfx.burst(PLAYER_POS[0], PLAYER_POS[1], VFX_PRESETS['enemy-hit-red']);
+        shakeEl(playerPortrait, 'sm'); flashEl(playerPortrait, 'flash-hit');
+        spawnDamagePop(playerDmgLayer, `${e.dmg}`, 'damage');
+        break;
+      case 'lifesteal':
+      case 'hotTick':
+      case 'spellHeal':
+        vfx.burst(PLAYER_POS[0], PLAYER_POS[1], VFX_PRESETS['heal-green']);
+        spawnDamagePop(playerDmgLayer, `+${e.heal}`, 'heal');
+        break;
+      case 'potion':
+        vfx.burst(PLAYER_POS[0], PLAYER_POS[1], VFX_PRESETS['heal-green']);
+        if (e.heal) spawnDamagePop(playerDmgLayer, `+${e.heal}`, 'heal');
+        break;
+      case 'buffApplied':
+      case 'shieldApplied':
+        vfx.burst(PLAYER_POS[0], PLAYER_POS[1], VFX_PRESETS[e.spell.vfx] || VFX_PRESETS.sparkle);
+        break;
+      case 'debuffApplied':
+      case 'dotApplied':
+      case 'stunApplied':
+        vfx.burst(ENEMY_POS[0], ENEMY_POS[1], VFX_PRESETS[e.spell.vfx] || VFX_PRESETS.hex);
+        break;
+      case 'shieldAbsorb':
+        spawnDamagePop(playerDmgLayer, `🛡${e.amt}`, 'shield');
+        break;
+      case 'dodge':
+        spawnDamagePop(playerDmgLayer, 'Dodge!', 'dodge');
+        break;
+      case 'enemyDefeated':
+      case 'playerDefeated':
+        shakeEl(screenEl, 'lg');
+        break;
+      default: break;
+    }
+  }
 }
 
 function renderCombatResult(c) {
   if (c.result === 'victory') {
     return `<div class="combat-result victory">
       <div class="result-title">Victory!</div>
-      <div class="result-rewards">+${c.rewardXp} XP &nbsp; +${c.rewardGold} Gold ${c.rewardLevels ? `<div class="levelup">Level Up! Now level ${G.player.level}</div>` : ''}</div>
+      <div class="result-rewards">+${c.rewardXp} XP &nbsp; +${c.rewardGold} Gold ${c.rewardLevels ? `<div class="levelup">Level Up! Now level ${G.player.level} (+${c.rewardLevels} skill pt${c.rewardLevels > 1 ? 's' : ''})</div>` : ''}</div>
       ${c.droppedItem ? `<div class="drop-card">${itemCardHTML(c.droppedItem, {})}<div class="drop-caption">Loot found!</div></div>` : ''}
       <button class="btn btn-primary" data-action="combat-continue">Continue</button>
     </div>`;
@@ -500,6 +760,18 @@ function renderCombatResult(c) {
 function renderLogLine(entry) {
   switch (entry.type) {
     case 'player': return `<div class="log-line log-player">${entry.crit ? '💥 Critical! ' : ''}You hit for ${entry.dmg}.</div>`;
+    case 'spellDamage': return `<div class="log-line log-player">${entry.spell.icon} ${entry.spell.name}${entry.crit ? ' — Critical!' : ''} for ${entry.dmg}.</div>`;
+    case 'dotTick': return `<div class="log-line log-dot">${entry.label} burns for ${entry.dmg}.</div>`;
+    case 'hotTick': return `<div class="log-line log-heal">${entry.label} restores ${entry.heal} HP.</div>`;
+    case 'buffApplied': return `<div class="log-line log-buff">${entry.spell.icon} ${entry.spell.name} takes hold!</div>`;
+    case 'debuffApplied': return `<div class="log-line log-debuff">${entry.spell.icon} ${entry.spell.name} weakens the enemy!</div>`;
+    case 'dotApplied': return `<div class="log-line log-debuff">${entry.spell.icon} ${entry.spell.name} begins to fester.</div>`;
+    case 'shieldApplied': return `<div class="log-line log-buff">${entry.spell.icon} ${entry.spell.name} shields you for ${entry.amt}.</div>`;
+    case 'shieldAbsorb': return `<div class="log-line log-buff">Your shield absorbs ${entry.amt} damage.</div>`;
+    case 'stunApplied': return `<div class="log-line log-debuff">${entry.spell.icon} ${entry.spell.name} staggers the enemy!</div>`;
+    case 'stunned': return `<div class="log-line log-dodge">The enemy is stunned and cannot act!</div>`;
+    case 'cleanse': return `<div class="log-line log-heal">Your mind clears of all hexes.</div>`;
+    case 'spellHeal': return `<div class="log-line log-heal">${entry.spell.icon} ${entry.spell.name} restores ${entry.heal} HP.</div>`;
     case 'enemy': return `<div class="log-line log-enemy">Enemy hits you for ${entry.dmg}.</div>`;
     case 'dodge': return `<div class="log-line log-dodge">You dodge the attack!</div>`;
     case 'lifesteal': return `<div class="log-line log-heal">Lifesteal +${entry.heal} HP.</div>`;
@@ -519,15 +791,23 @@ const actions = {
       (act) => {
         if (act === 'confirm') {
           clearSave();
-          G.player = newPlayer();
+          G.player = null;
           G.seenIntro = true;
           G.seenEnding = false;
           G.selectedItemId = null;
           G.townTab = 'dungeons';
-          persist();
-          goTown();
+          goClassSelect();
         }
       });
+  },
+  'preview-class': (btn) => { G.classPreview = btn.dataset.classKey; render(); },
+  'confirm-class': () => {
+    if (!G.classPreview) return;
+    if (G.player) applyClass(G.player, G.classPreview);
+    else G.player = newPlayer('Wanderer', G.classPreview);
+    G.classPreview = null;
+    persist();
+    goTown();
   },
   'town-tab': (btn) => { G.townTab = btn.dataset.tab; G.selectedItemId = null; render(); },
   'select-item': (btn) => { G.selectedItemId = btn.dataset.itemId; render(); },
@@ -552,6 +832,12 @@ const actions = {
     if (val > 0) { G.selectedItemId = null; persist(); toast(`Sold for ${val}g`); }
     render();
   },
+  'learn-spell': (btn) => {
+    const res = learnOrUpgradeSpell(G.player, btn.dataset.spellId);
+    if (!res.ok) toast(res.reason);
+    else { toast('Spell learned!'); persist(); }
+    render();
+  },
   'buy-potion': () => {
     const cost = 15;
     if (G.player.gold >= cost) { G.player.gold -= cost; G.player.potions++; persist(); toast('Potion purchased.'); }
@@ -567,12 +853,67 @@ const actions = {
     persist();
     render();
   },
+  'buy-shop-item': (btn) => {
+    const p = G.player;
+    const idx = (p.shop?.stock || []).findIndex(i => i.id === btn.dataset.itemId);
+    if (idx < 0) return;
+    const item = p.shop.stock[idx];
+    const price = buyPrice(item);
+    if (p.gold < price) { toast('Not enough gold.'); render(); return; }
+    if (p.inventory.length >= MAX_INVENTORY) { toast('Inventory full.'); render(); return; }
+    p.gold -= price;
+    p.shop.stock.splice(idx, 1);
+    addItemToInventory(p, item);
+    persist();
+    toast(`Bought ${item.name}!`);
+    render();
+  },
+  'refresh-shop': () => {
+    const p = G.player;
+    const cost = 25;
+    if (p.gold < cost) { toast('Not enough gold.'); render(); return; }
+    p.gold -= cost;
+    p.shop = { stock: generateShopStock(shopDepth(p)) };
+    persist();
+    render();
+  },
+  'gamble-spin': () => {
+    const p = G.player;
+    if (G.gamble?.spinning) return;
+    if (p.gold < 100) { toast('Not enough gold.'); render(); return; }
+    p.gold -= 100;
+    const depth = shopDepth(p);
+    const targetIdx = pickRarityIndex(depth, 0.15);
+    const segs = wheelSegments();
+    const seg = segs[targetIdx];
+    const landAngle = seg.start + Math.random() * (seg.end - seg.start);
+    const spins = 4 + Math.floor(Math.random() * 3);
+    const prevRotation = G.gamble?.rotation || 0;
+    const prevMod = ((prevRotation % 360) + 360) % 360;
+    const delta = spins * 360 + (((360 - landAngle) - prevMod) + 360) % 360;
+    G.gamble = { spinning: true, rotation: prevRotation + delta, resultItem: null, targetIdx };
+    persist();
+    render();
+    setTimeout(() => {
+      const item = generateItem(depth, { forceRarityIndex: G.gamble.targetIdx, bonusTier: 0.2 });
+      G.gamble.spinning = false;
+      G.gamble.resultItem = item;
+      if (addItemToInventory(p, item)) {
+        toast(`The wheel lands on ${item.name}!`);
+      } else {
+        p.gold += item.sellValue;
+        toast(`Inventory full — auto-sold ${item.name} for ${item.sellValue}g`);
+      }
+      persist();
+      render();
+    }, 3300);
+  },
   'enter-dungeon': (btn) => enterDungeon(parseInt(btn.dataset.index, 10), false),
   'enter-final': () => enterDungeon(28, true),
   'retreat': () => {
     openModal('Retreat to Town?', 'Leaving now abandons this dungeon attempt — its layout will reset next time you enter.',
       [{ label: 'Stay', action: 'cancel' }, { label: 'Retreat', action: 'confirm', primary: true }],
-      (act) => { if (act === 'confirm') { G.dungeon = null; goTown(); } });
+      (act) => { if (act === 'confirm') { stopDungeonParticles(); G.dungeon = null; goTown(); } });
   },
   'move': (btn) => attemptMove(parseInt(btn.dataset.dx, 10), parseInt(btn.dataset.dy, 10)),
   'tile-click': (btn) => {
@@ -581,11 +922,18 @@ const actions = {
     const dx = x - d.playerPos.x, dy = y - d.playerPos.y;
     if (Math.abs(dx) + Math.abs(dy) === 1) attemptMove(dx, dy);
   },
-  'combat-attack': () => doCombatRound(),
+  'combat-attack': () => performRound({ kind: 'attack' }),
+  'combat-cast': (btn) => castSpellAction(btn.dataset.spellId),
   'combat-potion': () => {
     const c = G.combat;
+    if (!c || c.locked) return;
     const healed = usePotion(G.player);
-    if (healed > 0) { c.log.push({ type: 'potion', heal: healed }); persist(); }
+    if (healed > 0) {
+      const entry = { type: 'potion', heal: healed };
+      c.log.push(entry);
+      c.lastRoundLog = [entry];
+      persist();
+    }
     render();
   },
   'combat-auto': () => toggleAuto(),
@@ -619,13 +967,14 @@ window.addEventListener('keydown', (e) => {
       e.preventDefault();
       const c = G.combat;
       if (c.result) finishCombat();
-      else doCombatRound();
+      else performRound({ kind: 'attack' });
     }
   }
 });
 
 window.addEventListener('resize', () => {
   if (G.screen === 'cutscene' && G.cutscene?.particles) G.cutscene.particles.resize();
+  if (G.screen === 'dungeon' && G.dungeon?.particles) G.dungeon.particles.resize();
 });
 
 // ---------- Boot ----------
@@ -637,14 +986,24 @@ function init() {
     G.seenIntro = !!saved.seenIntro;
     G.seenEnding = !!saved.seenEnding;
     if (!Array.isArray(G.player.clearedDungeons)) G.player.clearedDungeons = [];
+    if (!G.player.spellRanks) G.player.spellRanks = {};
+    if (typeof G.player.skillPoints !== 'number') G.player.skillPoints = 0;
+    if (typeof G.player.mana !== 'number') G.player.mana = 0;
+    if (!G.player.classKey) { goClassSelect(); return; }
     clampHp(G.player);
   } else {
-    G.player = newPlayer();
+    G.player = null;
     G.seenIntro = false;
   }
 
   if (!G.seenIntro) {
-    startCutscene(OPENING_SLIDES, () => { G.seenIntro = true; persist(); goTown(); });
+    startCutscene(OPENING_SLIDES, () => {
+      G.seenIntro = true;
+      if (!G.player || !G.player.classKey) goClassSelect();
+      else { persist(); goTown(); }
+    });
+  } else if (!G.player || !G.player.classKey) {
+    goClassSelect();
   } else {
     goTown();
   }

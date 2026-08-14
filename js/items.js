@@ -1,7 +1,7 @@
 import { RARITIES, ITEM_BASES, SLOT_ORDER, MARQUEE_NAMES, PREFIXES, SUFFIXES, STAT_LABEL, STAT_SUFFIX } from './data.js';
-import { randInt, choice, uid, clamp } from './utils.js';
+import { randInt, choice, uid } from './utils.js';
 
-function rollRarity(depth, bonusTier = 0) {
+export function pickRarityIndex(depth, bonusTier = 0) {
   const factor = 1 + depth * 0.05 + bonusTier * 0.35;
   const weights = RARITIES.map((r, i) => r.weight * Math.pow(factor, i));
   const total = weights.reduce((a, b) => a + b, 0);
@@ -14,10 +14,12 @@ function rollRarity(depth, bonusTier = 0) {
 }
 
 // minRarityIndex forces a floor (used for boss/chest guarantees). bonusTier nudges luck upward.
-export function generateItem(depth, { forcedSlot = null, minRarityIndex = 0, bonusTier = 0 } = {}) {
+// forceRarityIndex bypasses the roll entirely (used by the gamble wheel, where the visual
+// spin result must match the generated item exactly).
+export function generateItem(depth, { forcedSlot = null, minRarityIndex = 0, bonusTier = 0, forceRarityIndex = null } = {}) {
   const slot = forcedSlot || choice(SLOT_ORDER);
   const base = choice(ITEM_BASES[slot]);
-  const rarityIdx = Math.max(minRarityIndex, rollRarity(depth, bonusTier));
+  const rarityIdx = forceRarityIndex != null ? forceRarityIndex : Math.max(minRarityIndex, pickRarityIndex(depth, bonusTier));
   const rarity = RARITIES[rarityIdx];
   const depthScale = 1 + (depth - 1) * 0.11;
 
@@ -79,4 +81,21 @@ export function describeStats(stats) {
 
 export function rarityOf(item) {
   return RARITIES[item.rarityIdx];
+}
+
+export function buyPrice(item) {
+  return Math.max(5, Math.round(item.sellValue * 2.3));
+}
+
+export function generateShopStock(depth, count = 5) {
+  const slots = [...SLOT_ORDER];
+  for (let i = slots.length - 1; i > 0; i--) {
+    const j = randInt(0, i);
+    [slots[i], slots[j]] = [slots[j], slots[i]];
+  }
+  const stock = [];
+  for (let i = 0; i < count; i++) {
+    stock.push(generateItem(Math.max(1, depth), { forcedSlot: slots[i % slots.length], bonusTier: 0.1 }));
+  }
+  return stock;
 }
