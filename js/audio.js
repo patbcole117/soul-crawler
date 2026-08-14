@@ -26,7 +26,7 @@ let leadDelayFilter = null;
 
 export function isMuted() { return muted; }
 
-function makeImpulse(duration = 2.4, decay = 2.6) {
+function makeImpulse(duration = 1.6, decay = 3.2) {
   const rate = ctx.sampleRate;
   const length = Math.max(1, Math.floor(rate * duration));
   const impulse = ctx.createBuffer(2, length, rate);
@@ -48,35 +48,42 @@ export function initAudio() {
     masterGain = ctx.createGain();
     masterGain.connect(ctx.destination);
     musicGain = ctx.createGain();
-    musicGain.gain.value = 0.34;
+    musicGain.gain.value = 0.26;
     musicGain.connect(masterGain);
     sfxGain = ctx.createGain();
     sfxGain.gain.value = 0.7;
     sfxGain.connect(masterGain);
 
-    // Music bus fans out to a dry path and a convolution-reverb send for space.
+    // Music bus fans out to a dry path and a light convolution-reverb send for space —
+    // kept short and quiet so it adds air without turning into a wash.
     musicBus = ctx.createGain();
     musicBus.gain.value = 1;
     musicBus.connect(musicGain);
     reverbConvolver = ctx.createConvolver();
     reverbConvolver.buffer = makeImpulse();
     reverbWet = ctx.createGain();
-    reverbWet.gain.value = 0.26;
+    reverbWet.gain.value = 0.14;
     musicBus.connect(reverbConvolver);
     reverbConvolver.connect(reverbWet);
     reverbWet.connect(musicGain);
 
-    // Lead voice gets its own feedback delay (echo) in addition to the shared reverb.
+    // Lead voice gets a warm lowpass (so it never sounds like a raw beep) and a very
+    // subtle, low-feedback delay for a touch of space — not a repeating echo texture.
     leadBus = ctx.createGain();
     leadBus.gain.value = 1;
-    leadBus.connect(musicBus);
+    const leadToneFilter = ctx.createBiquadFilter();
+    leadToneFilter.type = 'lowpass';
+    leadToneFilter.frequency.value = 3200;
+    leadToneFilter.Q.value = 0.2;
+    leadBus.connect(leadToneFilter);
+    leadToneFilter.connect(musicBus);
     leadDelay = ctx.createDelay(1.2);
     leadDelay.delayTime.value = 0.32;
     leadDelayFilter = ctx.createBiquadFilter();
     leadDelayFilter.type = 'lowpass';
-    leadDelayFilter.frequency.value = 2200;
+    leadDelayFilter.frequency.value = 1600;
     leadFeedback = ctx.createGain();
-    leadFeedback.gain.value = 0.34;
+    leadFeedback.gain.value = 0.16;
     leadBus.connect(leadDelay);
     leadDelay.connect(leadDelayFilter);
     leadDelayFilter.connect(leadFeedback);
@@ -228,37 +235,45 @@ function modeForT(t) {
   return 'dark';
 }
 
-// Seventh chords (root/3rd/5th/7th) rather than plain triads, for richer harmony.
-function degreeToChordSemis(scale, degree) {
-  return [degree, degree + 2, degree + 4, degree + 6].map((i) => {
+// Plain triads (root/3rd/5th) — clean, unambiguous harmony. A 7th tone is computed
+// separately and offered to the melody only, as an occasional color note, never held.
+function triadSemis(scale, degree) {
+  return [degree, degree + 2, degree + 4].map((i) => {
     const oct = Math.floor(i / 7);
     return scale[((i % 7) + 7) % 7] + oct * 12;
   });
 }
+function seventhSemi(scale, degree) {
+  const i = degree + 6;
+  const oct = Math.floor(i / 7);
+  return scale[((i % 7) + 7) % 7] + oct * 12;
+}
 
-// ---------- pad voice (crossfaded on chord changes) ----------
+// ---------- pad voice (crossfaded on chord changes; mid-register only — no sub-bass,
+// no tight dissonant clusters, so nothing here can turn into a droning hum) ----------
 
-function createPadVoice(freqs, filterFreq) {
+function createPadVoice(freqs, filterFreq, level) {
   const gain = ctx.createGain();
   gain.gain.value = 0.0001;
   const filter = ctx.createBiquadFilter();
   filter.type = 'lowpass';
   filter.frequency.value = filterFreq;
+  filter.Q.value = 0.25;
   gain.connect(filter);
   filter.connect(musicBus);
   const oscs = freqs.map((f, i) => {
     const o = ctx.createOscillator();
     o.type = i === 0 ? 'sine' : 'triangle';
     o.frequency.value = f;
-    o.detune.value = (Math.random() - 0.5) * 5;
+    o.detune.value = (Math.random() - 0.5) * 3;
     const og = ctx.createGain();
-    og.gain.value = 1 / (i + 1.3);
+    og.gain.value = 1 / (i + 1.5);
     o.connect(og); og.connect(gain);
     o.start();
     return o;
   });
   return {
-    fadeIn(dur, level) {
+    fadeIn(dur) {
       gain.gain.cancelScheduledValues(ctx.currentTime);
       gain.gain.setTargetAtTime(level, ctx.currentTime, dur / 3);
     },
@@ -274,27 +289,28 @@ function kickAt(time, peak) {
   if (!ctx) return;
   const osc = ctx.createOscillator();
   osc.type = 'sine';
-  osc.frequency.setValueAtTime(150, time);
-  osc.frequency.exponentialRampToValueAtTime(45, time + 0.12);
+  osc.frequency.setValueAtTime(130, time);
+  osc.frequency.exponentialRampToValueAtTime(48, time + 0.11);
   const g = ctx.createGain();
   g.gain.setValueAtTime(peak, time);
-  g.gain.exponentialRampToValueAtTime(0.001, time + 0.28);
+  g.gain.exponentialRampToValueAtTime(0.001, time + 0.22);
   osc.connect(g); g.connect(musicBus);
-  osc.start(time); osc.stop(time + 0.3);
+  osc.start(time); osc.stop(time + 0.24);
 }
 
 function hatAt(time, peak) {
-  noiseBurstAt(time, { duration: 0.045, peak, filterFreq: 7500, filterType: 'highpass', dest: musicBus });
+  noiseBurstAt(time, { duration: 0.035, peak, filterFreq: 8000, filterType: 'highpass', dest: musicBus });
 }
 
-// A sudden dissonant cluster stab (minor 2nd + tritone) — the classic unpredictable
-// horror-strings jump-scare, used sparingly by spooky/boss themes.
+// A brief, sharp dissonant stab (minor 2nd + tritone) that hits hard and decays fast —
+// the classic unpredictable horror-strings jump-scare. Never sustained, so it startles
+// instead of droning.
 function stingerHit(time, ferocity) {
   const base = 190 + Math.random() * 170;
   [0, 1, 6].forEach((iv) => {
-    toneAt(base * Math.pow(2, iv / 12), time, { type: 'sawtooth', peak: 0.2 + ferocity * 0.14, attack: 0.002, decay: 0.05, sustain: 0.15, release: 0.55, dest: musicBus });
+    toneAt(base * Math.pow(2, iv / 12), time, { type: 'sawtooth', peak: 0.16 + ferocity * 0.1, attack: 0.002, decay: 0.04, sustain: 0.05, release: 0.3, dest: musicBus });
   });
-  noiseBurstAt(time, { duration: 0.25, peak: 0.14 + ferocity * 0.08, filterFreq: 2600, filterType: 'bandpass', dest: musicBus });
+  noiseBurstAt(time, { duration: 0.18, peak: 0.1 + ferocity * 0.06, filterFreq: 2600, filterType: 'bandpass', dest: musicBus });
 }
 
 // ---------- scheduler ----------
@@ -305,116 +321,94 @@ let compositionState = null;
 let currentKey = null;
 let combatIntensity = false;
 
-const ARP_PATTERN = [0, 1, 2, 1, 0, 2, 1, 3];
-const COUNTER_PATTERN = [3, 2, 0, 1, 3, 0, 2, 1];
+// A fixed, repeating melodic contour (scale-degree offsets within the chord) rather than
+// mostly-random note choice — repetition is what makes a generative line read as "a
+// tune" instead of noise.
+const MELODY_PATTERN = [0, 2, 1, 2, 0, 1, 2, 1];
 
 function changeChord(state, time) {
   state.chordIdx = (state.chordIdx + 1) % state.progression.length;
   const degree = state.progression[state.chordIdx];
-  const semis = degreeToChordSemis(state.scale, degree);
-  const freqs = semis.map((s) => state.chordRootFreq * Math.pow(2, s / 12));
-  state.currentChordFreqs = freqs;
-  const padFreqs = [freqs[0] / 2, freqs[0], freqs[1], freqs[2], freqs[3], freqs[0] * 2];
-  const filterFreq = 900 - state.t * 350;
-  const newPad = createPadVoice(padFreqs, filterFreq);
-  newPad.fadeIn(1.6, 0.24 + state.t * 0.06);
-  if (state.padVoice) state.padVoice.fadeOut(1.6);
+  const triad = triadSemis(state.scale, degree).map((s) => state.chordRootFreq * Math.pow(2, s / 12));
+  const seventh = state.chordRootFreq * Math.pow(2, seventhSemi(state.scale, degree) / 12);
+  state.currentChordFreqs = [...triad, seventh];
+  const filterFreq = 1500 - state.t * 350;
+  const newPad = createPadVoice(triad, filterFreq, 0.13 + state.t * 0.02);
+  newPad.fadeIn(1.3);
+  if (state.padVoice) state.padVoice.fadeOut(1.1);
   state.padVoice = newPad;
 }
 
+// Ambient theme: soft triad pad, a short plucked (never sustained) bass quarter-note,
+// percussion that only shows up once things get moving, and a catchy, mostly-repeating
+// melody. Chromatic "spice" is reserved for deep dungeons and disabled near town.
 function scheduleStep(state, step, time) {
   const posInBar = step % 16;
-  const stepsPerChord = state.barsPerChord * 16;
-  if (step % stepsPerChord === 0) changeChord(state, time);
+  if (step % 16 === 0) changeChord(state, time);
   const chord = state.currentChordFreqs;
   const rng = state.rng;
-  const intensity = combatIntensity ? 0.18 : 0;
+  const intensity = combatIntensity ? 0.15 : 0;
 
-  if (posInBar === 0 || posInBar === 8) {
-    toneAt(chord[0] / 2, time, { type: 'triangle', peak: 0.22 + intensity * 0.3, attack: 0.008, decay: 0.16, release: 0.32, dest: musicBus });
-  } else if ((state.t > 0.5 || combatIntensity) && posInBar === 12 && rng() < 0.45) {
-    toneAt(chord[0] / 2, time, { type: 'sawtooth', peak: 0.15 + intensity * 0.2, attack: 0.005, decay: 0.1, release: 0.2, dest: musicBus });
+  if (posInBar % 4 === 0) {
+    toneAt(state.bassFreq, time, { type: 'triangle', peak: 0.15 + intensity * 0.12, attack: 0.006, decay: 0.13, release: 0.18, dest: musicBus });
   }
 
-  if (posInBar % 8 === 0) kickAt(time, 0.26 + intensity);
-  const hatProb = 0.42 + state.t * 0.3 + intensity;
-  if (posInBar % 2 === 0 && rng() < hatProb) hatAt(time, 0.045 + state.t * 0.025);
+  if (state.t > 0.22 || combatIntensity) {
+    if (posInBar % 8 === 0) kickAt(time, 0.14 + state.t * 0.14 + intensity * 0.14);
+    const hatProb = 0.16 + state.t * 0.32 + intensity * 0.25;
+    if (posInBar % 4 === 2 && rng() < hatProb) hatAt(time, 0.028 + state.t * 0.02);
+  }
 
-  // Lead: a simple up/down arpeggio contour through the current (now four-note) chord.
   if (posInBar % 2 === 0) {
-    const density = 0.32 + state.t * 0.42 + intensity;
-    if (rng() < density) {
+    const playProb = 0.78 + intensity * 0.1;
+    if (rng() < playProb) {
       state.arpStep = (state.arpStep || 0) + 1;
-      let idx;
-      if (rng() < 0.2) idx = Math.floor(rng() * chord.length);
-      else idx = ARP_PATTERN[state.arpStep % ARP_PATTERN.length] % chord.length;
-      let freq = chord[idx];
-      if (rng() < 0.5) freq *= 2;
-      if (rng() < 0.09 + state.t * 0.14) freq *= Math.pow(2, (rng() < 0.5 ? -1 : 1) / 12);
-      toneAt(freq, time, { type: state.t > 0.6 ? 'sawtooth' : 'triangle', peak: 0.1, attack: 0.004, decay: 0.12, release: 0.32, dest: leadBus });
+      let idx = MELODY_PATTERN[state.arpStep % MELODY_PATTERN.length] % 3;
+      if (state.t > 0.5 && rng() < 0.15) idx = 3; // occasional 7th color note, deeper dungeons only
+      let freq = chord[idx] * 2;
+      if (state.t > 0.72 && rng() < 0.08) freq *= Math.pow(2, (rng() < 0.5 ? -1 : 1) / 12); // rare spice, deep only
+      toneAt(freq, time, { type: 'triangle', peak: 0.11, attack: 0.006, decay: 0.13, release: 0.26, dest: leadBus });
     }
   }
 
-  // Countermelody: a softer answering voice a register down, offset from the lead's
-  // rhythm and walking the chord in the opposite direction — simple two-part interplay.
-  if (posInBar % 4 === 2) {
-    const density = 0.28 + state.t * 0.3;
-    if (rng() < density) {
-      state.counterStep = (state.counterStep || 0) + 1;
-      const idx = COUNTER_PATTERN[state.counterStep % COUNTER_PATTERN.length] % chord.length;
-      const freq = chord[idx] * 0.5;
-      toneAt(freq, time, { type: 'sine', peak: 0.075, attack: 0.012, decay: 0.16, sustain: 0.1, release: 0.42, dest: musicBus });
-    }
-  }
-
-  if (state.spooky && rng() < 0.01 + state.t * 0.006) stingerHit(time, 0.3 + state.t * 0.2);
+  if (state.spooky && rng() < 0.006 + state.t * 0.004) stingerHit(time, 0.25 + state.t * 0.15);
 }
 
 function changeBossChord(state, time) {
   state.chordIdx = (state.chordIdx + 1) % state.progression.length;
   const degree = state.progression[state.chordIdx];
-  const semis = degreeToChordSemis(state.scale, degree);
-  const freqs = semis.map((s) => state.chordRootFreq * Math.pow(2, s / 12));
+  const freqs = triadSemis(state.scale, degree).map((s) => state.chordRootFreq * Math.pow(2, s / 12));
   state.currentChordFreqs = freqs;
-  const clusterSemis = [0, 1, 6];
-  const padFreqs = clusterSemis.map((s) => (state.chordRootFreq * 0.5) * Math.pow(2, s / 12)).concat(freqs);
-  const filterFreq = 480 + state.ferocity * 280;
-  const newPad = createPadVoice(padFreqs, filterFreq);
-  newPad.fadeIn(0.45, 0.2 + state.ferocity * 0.08);
-  if (state.padVoice) state.padVoice.fadeOut(0.45);
-  state.padVoice = newPad;
+  // A short punchy stab instead of a sustained pad — hits once per chord change, then
+  // gets out of the way, so the boss theme stays driving instead of droning.
+  freqs.forEach((f) => toneAt(f, time, { type: 'sawtooth', peak: 0.11 + state.ferocity * 0.06, attack: 0.004, decay: 0.1, release: 0.22, dest: musicBus }));
 }
 
-// Boss/final-boss theme: relentless dark-mode ostinato, heavy kick, dissonant stabs,
-// and unpredictable horror stingers. Ferocity (0-1) pushes tempo, weight, and density.
+// Boss/final-boss theme: fast dark-mode drive, punchy kick, a repeating (catchy, not
+// random) melodic ostinato, and unpredictable horror stingers. Ferocity (0-1) pushes
+// tempo, weight, and how often things turn dissonant.
 function scheduleBossStep(state, step, time) {
   const posInBar = step % 16;
-  const stepsPerChord = state.barsPerChord * 16;
-  if (step % stepsPerChord === 0) changeBossChord(state, time);
+  if (step % 16 === 0) changeBossChord(state, time);
   const chord = state.currentChordFreqs;
   const rng = state.rng;
   const f = state.ferocity;
 
-  if (posInBar % 2 === 0) {
-    toneAt(state.bassFreq, time, { type: 'sawtooth', peak: 0.24 + f * 0.14, attack: 0.004, decay: 0.1, release: 0.16, dest: musicBus });
-  }
   if (posInBar % 4 === 0) {
-    kickAt(time, 0.32 + f * 0.2);
-    if (f > 0.55 && rng() < 0.4) kickAt(time + state.secondsPer16th * 0.5, 0.2);
+    toneAt(state.bassFreq, time, { type: 'sawtooth', peak: 0.17 + f * 0.1, attack: 0.004, decay: 0.09, release: 0.13, dest: musicBus });
   }
-  if (rng() < 0.5 + f * 0.3) hatAt(time, 0.05 + f * 0.03);
-  if ((posInBar === 6 || posInBar === 14) && rng() < 0.5 + f * 0.3) {
-    chord.forEach((freq) => toneAt(freq, time, { type: 'sawtooth', peak: 0.09, attack: 0.003, decay: 0.1, release: 0.25, dest: musicBus }));
-  }
-  if (rng() < 0.55 + f * 0.25) {
+  if (posInBar % 4 === 0) kickAt(time, 0.2 + f * 0.16);
+  if (posInBar % 8 === 4 && f > 0.5 && rng() < 0.5) kickAt(time, 0.14 + f * 0.1);
+  if (rng() < 0.45 + f * 0.25) hatAt(time, 0.035 + f * 0.025);
+
+  if (rng() < 0.62 + f * 0.2) {
     state.arpStep = (state.arpStep || 0) + 1;
-    const idx = ARP_PATTERN[state.arpStep % ARP_PATTERN.length] % chord.length;
-    let freq = chord[idx];
-    if (rng() < 0.5) freq *= 2;
-    if (rng() < 0.3) freq *= Math.pow(2, 1 / 12);
-    toneAt(freq, time, { type: 'sawtooth', peak: 0.09, attack: 0.003, decay: 0.08, release: 0.22, dest: leadBus });
+    const idx = MELODY_PATTERN[state.arpStep % MELODY_PATTERN.length] % chord.length;
+    let freq = chord[idx] * 2;
+    if (rng() < 0.1 + f * 0.15) freq *= Math.pow(2, 1 / 12);
+    toneAt(freq, time, { type: 'sawtooth', peak: 0.085, attack: 0.003, decay: 0.08, release: 0.16, dest: leadBus });
   }
-  if (rng() < 0.012 + f * 0.012) stingerHit(time, f);
+  if (rng() < 0.01 + f * 0.014) stingerHit(time, f);
 }
 
 function schedulerTick() {
@@ -430,7 +424,7 @@ function schedulerTick() {
 
 function stopComposition() {
   if (schedulerTimer) { clearInterval(schedulerTimer); schedulerTimer = null; }
-  if (compositionState?.padVoice) compositionState.padVoice.fadeOut(1.0);
+  if (compositionState?.padVoice) compositionState.padVoice.fadeOut(0.8);
   compositionState = null;
   currentKey = null;
 }
@@ -447,18 +441,17 @@ function startComposition(t, seed, key, opts = {}) {
   const progression = progVariants[Math.floor(rng() * progVariants.length)];
   const transpose = Math.floor(rng() * 3);
 
-  const bassMidi = 31 - Math.round(t * 6) + transpose;
+  const bassMidi = 38 - Math.round(t * 5) + transpose; // clear register, well clear of sub-bass mud
   const bassFreq = 440 * Math.pow(2, (bassMidi - 69) / 12);
   const chordRootFreq = bassFreq * 4;
-  const bpm = 60 + t * 26;
+  const bpm = 64 + t * 22;
   const secondsPer16th = (60 / bpm) / 4;
 
   if (leadDelay) leadDelay.delayTime.setTargetAtTime((60 / bpm) * 0.75, ctx.currentTime, 0.1);
 
   compositionState = {
-    step: 0, chordIdx: -1, arpStep: 0, counterStep: 0,
-    barsPerChord: t > 0.7 ? 1 : 2,
-    padVoice: null, currentChordFreqs: [chordRootFreq],
+    step: 0, chordIdx: -1, arpStep: 0,
+    padVoice: null, currentChordFreqs: [chordRootFreq, chordRootFreq, chordRootFreq],
     rng, mode, scale, progression, chordRootFreq, bassFreq, bpm, secondsPer16th, t, key,
     engine: 'ambient', spooky: !!opts.spooky,
   };
@@ -477,18 +470,17 @@ function startBossComposition(seed, key, ferocity) {
   const progression = progVariants[Math.floor(rng() * progVariants.length)];
   const transpose = Math.floor(rng() * 3);
 
-  const bassMidi = 28 - Math.round(ferocity * 4) + transpose;
+  const bassMidi = 35 - Math.round(ferocity * 4) + transpose;
   const bassFreq = 440 * Math.pow(2, (bassMidi - 69) / 12);
   const chordRootFreq = bassFreq * 4;
-  const bpm = 80 + ferocity * 42;
+  const bpm = 92 + ferocity * 36;
   const secondsPer16th = (60 / bpm) / 4;
 
   if (leadDelay) leadDelay.delayTime.setTargetAtTime((60 / bpm) * 0.5, ctx.currentTime, 0.08);
 
   compositionState = {
     step: 0, chordIdx: -1, arpStep: 0,
-    barsPerChord: ferocity > 0.6 ? 0.5 : 1,
-    padVoice: null, currentChordFreqs: [chordRootFreq],
+    padVoice: null, currentChordFreqs: [chordRootFreq, chordRootFreq, chordRootFreq],
     rng, scale, progression, chordRootFreq, bassFreq, bpm, secondsPer16th,
     t: 1, ferocity, engine: 'boss', key,
   };
@@ -514,7 +506,7 @@ export const music = {
   },
   playUniqueTheme(depthIndex) {
     ensureAudio();
-    const t = Math.max(0.55, Math.min(1, (depthIndex - 1) / 26));
+    const t = Math.max(0.5, Math.min(1, (depthIndex - 1) / 26));
     startComposition(t, depthIndex * 311 + 41, `unique-${depthIndex}`, { spooky: true });
   },
   stop() { stopComposition(); combatIntensity = false; },
