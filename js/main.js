@@ -17,6 +17,7 @@ import {
 } from './ui.js';
 import { createVfxLayer, VFX_PRESETS, shakeEl, flashEl, spawnDamagePop, spawnProjectile, spawnMeleeSwipe, sleep } from './vfx.js';
 import { ensureAudio, toggleMute, isMuted, sfx, music } from './audio.js';
+import { getAura } from './auras.js';
 import { randInt, fmt } from './utils.js';
 
 const root = document.getElementById('app');
@@ -39,6 +40,7 @@ const G = {
   classPreview: null,
   gamble: null,
   dungeonGearOpen: false,
+  activeAuras: [],
 };
 
 function persist() {
@@ -73,6 +75,51 @@ function goClassSelect() {
   render();
 }
 
+// ---------- Ambient auras ----------
+
+// Recomputes which shrines/hazards are currently in range of the player (their tile
+// plus the 8 surrounding it). Called after every move so world pickups and combat both
+// see a fresh, accurate list.
+function computeActiveAuras() {
+  const d = G.dungeon;
+  if (!d || !d.auras) { G.activeAuras = []; return; }
+  const px = d.playerPos.x, py = d.playerPos.y;
+  const active = [];
+  for (const key in d.auras) {
+    const [ax, ay] = key.split(',').map(Number);
+    if (Math.abs(ax - px) <= 1 && Math.abs(ay - py) <= 1) {
+      const aura = getAura(d.auras[key]);
+      if (aura) active.push(aura);
+    }
+  }
+  G.activeAuras = active;
+}
+
+function auraBonus(auras, stat) {
+  return (auras || []).filter(a => a.stat === stat).reduce((sum, a) => sum + a.magnitude, 0);
+}
+
+// Folds any ambient auras the player was standing in when the fight started into the
+// existing combat effect arrays (reusing the same machinery spells/monster abilities
+// use), so they show up as chips, tick every round, and read naturally in the log.
+function applyAurasToCombat(c, auras) {
+  if (!auras || !auras.length) return;
+  const names = [];
+  for (const aura of auras) {
+    names.push(`${aura.icon} ${aura.name}`);
+    if (aura.stat === 'regen') {
+      c.playerTicks.push({ healPerTurn: aura.magnitude, turnsLeft: 9999, label: aura.name, desc: aura.desc });
+    } else if (aura.stat === 'poison' || aura.stat === 'drain') {
+      c.playerDotTicks.push({ dmgPerTurn: aura.magnitude, turnsLeft: 9999, label: aura.name, desc: aura.desc });
+    } else if (aura.stat === 'lootRarity' || aura.stat === 'goldFind') {
+      // handled directly against c.auras when rolling loot/gold, not a combat stat
+    } else {
+      c.playerEffects.push({ stat: aura.stat, amount: aura.magnitude, turnsLeft: 9999, label: aura.name, desc: aura.desc });
+    }
+  }
+  c.log.push({ type: 'auraAnnounce', names });
+}
+
 // ---------- Dungeon flow ----------
 
 function enterDungeon(index, isFinal) {
@@ -81,6 +128,7 @@ function enterDungeon(index, isFinal) {
   G.screen = 'dungeon';
   G.selectedItemId = null;
   G.dungeonGearOpen = false;
+  computeActiveAuras();
   music.playDungeon(index, isFinal);
   persist();
   render();
@@ -100,6 +148,7 @@ function attemptMove(dx, dy) {
   }
   d.playerPos = { x: nx, y: ny };
   revealAround(d, nx, ny, 2);
+  computeActiveAuras();
   if (type === 'chest') handleChest(nx, ny);
   else if (type === 'gold') handleGold(nx, ny);
   else if (type === 'fountain') handleFountain(nx, ny);
@@ -109,7 +158,8 @@ function attemptMove(dx, dy) {
 function handleChest(x, y) {
   const d = G.dungeon;
   setTile(d, x, y, 'floor');
-  const item = generateItem(d.depthIndex, { minRarityIndex: 1, bonusTier: 0.4 });
+  const bonusRarity = auraBonus(G.activeAuras, 'lootRarity');
+  const item = generateItem(d.depthIndex, { minRarityIndex: 1, bonusTier: 0.4 + bonusRarity });
   const ok = addItemToInventory(G.player, item);
   if (ok) toast(`Found ${item.name}!`);
   else { G.player.gold += item.sellValue; toast(`Inventory full — auto-sold ${item.name} for ${item.sellValue}g`); }
@@ -121,7 +171,8 @@ function handleGold(x, y) {
   const d = G.dungeon;
   setTile(d, x, y, 'floor');
   const stats = maxStats(G.player);
-  const amt = Math.round(randInt(8, 20 + d.depthIndex * 3) * (1 + stats.goldFind / 100));
+  const bonusGoldFind = auraBonus(G.activeAuras, 'goldFind');
+  const amt = Math.round(randInt(8, 20 + d.depthIndex * 3) * (1 + (stats.goldFind + bonusGoldFind) / 100));
   G.player.gold += amt;
   toast(`+${amt} gold`);
   sfx.gold();
@@ -147,8 +198,9 @@ function startCombat(enemy, pos) {
   stopDungeonParticles();
   G.combat = {
     enemy, pos, log: [], lastRoundLog: null, auto: false, timer: null,
-    result: null, locked: false, vfx: null, ...newCombatState(),
+    result: null, locked: false, vfx: null, auras: [...G.activeAuras], ...newCombatState(),
   };
+  applyAurasToCombat(G.combat, G.combat.auras);
   G.screen = 'combat';
   const depth = G.dungeon?.depthIndex || 1;
   if (enemy.kind === 'final') music.playBossTheme(depth, true);
@@ -170,9 +222,10 @@ function performRound(action) {
     c.locked = true;
     stopAuto();
     const levels = addXp(p, c.enemy.xp);
-    p.gold += c.enemy.gold;
+    const goldReward = Math.round(c.enemy.gold * (1 + auraBonus(c.auras, 'goldFind') / 100));
+    p.gold += goldReward;
     c.rewardXp = c.enemy.xp;
-    c.rewardGold = c.enemy.gold;
+    c.rewardGold = goldReward;
     c.rewardLevels = levels;
 
     const kind = c.enemy.kind;
@@ -185,6 +238,7 @@ function performRound(action) {
     else if (tier === 'rare') { dropChance = 0.95; minRarity = 1; bonusTier = 0.7; }
     else if (tier === 'magic') { dropChance = 0.75; minRarity = 0; bonusTier = 0.35; }
     else { dropChance = 0.55; minRarity = 0; bonusTier = 0; }
+    bonusTier += auraBonus(c.auras, 'lootRarity');
 
     if (Math.random() < dropChance) {
       const item = generateItem(G.dungeon.depthIndex, { minRarityIndex: minRarity, bonusTier, forceRarityIndex });
@@ -271,6 +325,7 @@ function finishCombat() {
     setTile(d, c.pos.x, c.pos.y, 'floor');
     d.playerPos = { ...c.pos };
     revealAround(d, c.pos.x, c.pos.y, 2);
+    computeActiveAuras();
     const kind = c.enemy.kind;
     G.combat = null;
     G.screen = 'town'; // safe fallback while the boss-clear modal / ending cutscene take over
@@ -638,6 +693,23 @@ function tierBadge(enemyObj) {
   return ` tier-${tier}`;
 }
 
+// Whether (x,y) falls in the radius of an ambient shrine/hazard elsewhere on the map —
+// used to give the surrounding zone a subtle tint so its reach is visible at a glance.
+// A debuff zone always wins the tint if zones overlap, since danger is worth noticing first.
+function auraZoneKind(d, x, y) {
+  let kind = null;
+  for (const key in d.auras) {
+    const [ax, ay] = key.split(',').map(Number);
+    if (Math.abs(ax - x) <= 1 && Math.abs(ay - y) <= 1) {
+      const aura = getAura(d.auras[key]);
+      if (!aura) continue;
+      if (aura.kind === 'debuff') return 'debuff';
+      kind = 'buff';
+    }
+  }
+  return kind;
+}
+
 function renderDungeon() {
   const d = G.dungeon;
   const p = G.player;
@@ -653,15 +725,28 @@ function renderDungeon() {
       cls += revealed ? ` t-${type}` : ' hidden';
       if (isPlayer) cls += ' player-here';
       let glyph = revealed ? (isPlayer ? '🧍' : tileGlyph(type)) : '';
+      let title = '';
       if (revealed && type === 'enemy') {
         const enemyObj = d.enemies[key];
         cls += tierBadge(enemyObj);
         if (enemyObj?.tier === 'unique' && enemyObj.icon) glyph = enemyObj.icon;
-      } else if (revealed && (type === 'floor' || type === 'start') && d.decorations[key]) {
-        cls += ' tile-deco';
-        glyph = d.decorations[key];
+      } else if (revealed && (type === 'floor' || type === 'start')) {
+        const auraId = d.auras[key];
+        if (auraId) {
+          const aura = getAura(auraId);
+          cls += ` aura-${aura.kind}`;
+          glyph = aura.icon;
+          title = `${aura.name} — ${aura.desc}`;
+        } else if (d.decorations[key]) {
+          cls += ' tile-deco';
+          glyph = d.decorations[key];
+        }
       }
-      gridHTML += `<div class="${cls}" data-action="tile-click" data-x="${x}" data-y="${y}">${glyph}</div>`;
+      if (revealed && !d.auras[key]) {
+        const zone = auraZoneKind(d, x, y);
+        if (zone) cls += ` in-aura-${zone}`;
+      }
+      gridHTML += `<div class="${cls}" data-action="tile-click" data-x="${x}" data-y="${y}"${title ? ` title="${title}"` : ''}>${glyph}</div>`;
     }
   }
   const lightX = ((d.playerPos.x + 0.5) / d.size) * 100;
@@ -679,6 +764,7 @@ function renderDungeon() {
         <button class="btn btn-ghost" data-action="toggle-dungeon-gear" title="Gear">🎒</button>
       </div>
     </header>
+    ${G.activeAuras.length ? `<div class="active-auras-bar">${G.activeAuras.map(a => `<span class="chip ${a.kind === 'buff' ? 'chip-good' : 'chip-bad'}" title="${a.name} — ${a.desc}">${a.icon} ${a.name}</span>`).join('')}</div>` : ''}
     <div class="dungeon-wrap">
       <div class="dungeon-grid-frame">
         <div class="dungeon-grid" style="grid-template-columns:repeat(${d.size},1fr)">${gridHTML}</div>
@@ -727,17 +813,22 @@ function enemyIcon(enemy) {
   }
 }
 
+function turnsLabel(n) {
+  return n >= 999 ? '∞' : n;
+}
+
 function effectChipsHTML(c, side) {
   const chips = [];
   const effs = side === 'enemy' ? c.enemyEffects : c.playerEffects;
-  for (const e of effs) chips.push(`<span class="chip ${e.amount < 0 ? 'chip-bad' : 'chip-good'}">${e.label} (${e.turnsLeft})</span>`);
+  for (const e of effs) chips.push(`<span class="chip ${e.amount < 0 ? 'chip-bad' : 'chip-good'}" title="${e.desc || e.label}">${e.label} (${turnsLabel(e.turnsLeft)})</span>`);
   if (side === 'enemy') {
-    for (const t of c.enemyTicks) chips.push(`<span class="chip chip-bad">${t.label} (${t.turnsLeft})</span>`);
-    if (c.enemyStunTurns > 0) chips.push(`<span class="chip chip-bad">Stunned (${c.enemyStunTurns})</span>`);
+    for (const t of c.enemyTicks) chips.push(`<span class="chip chip-bad" title="${t.desc || t.label}">${t.label} (${turnsLabel(t.turnsLeft)})</span>`);
+    if (c.enemyStunTurns > 0) chips.push(`<span class="chip chip-bad" title="Cannot act this turn.">Stunned (${c.enemyStunTurns})</span>`);
   } else {
-    if (c.playerShield > 0) chips.push(`<span class="chip chip-good">🛡 Shield ${c.playerShield}</span>`);
-    for (const t of (c.playerDotTicks || [])) chips.push(`<span class="chip chip-bad">${t.label} (${t.turnsLeft})</span>`);
-    if (c.playerStunTurns > 0) chips.push(`<span class="chip chip-bad">Stunned (${c.playerStunTurns})</span>`);
+    if (c.playerShield > 0) chips.push(`<span class="chip chip-good" title="${c.playerShieldDesc || 'Absorbs incoming damage.'}">🛡 Shield ${c.playerShield}</span>`);
+    for (const t of (c.playerTicks || [])) chips.push(`<span class="chip chip-good" title="${t.desc || t.label}">${t.label} (${turnsLabel(t.turnsLeft)})</span>`);
+    for (const t of (c.playerDotTicks || [])) chips.push(`<span class="chip chip-bad" title="${t.desc || t.label}">${t.label} (${turnsLabel(t.turnsLeft)})</span>`);
+    if (c.playerStunTurns > 0) chips.push(`<span class="chip chip-bad" title="You cannot act this turn.">Stunned (${c.playerStunTurns})</span>`);
   }
   return chips.join('');
 }
@@ -945,6 +1036,7 @@ function crit() { return `<span class="log-crit">CRITICAL!</span>`; }
 function renderLogLine(entry) {
   const enemyName = G.combat ? G.combat.enemy.name : 'the enemy';
   switch (entry.type) {
+    case 'auraAnnounce': return `<div class="log-line log-buff">${entry.names.join(' ')} ${entry.names.length > 1 ? 'linger over' : 'lingers over'} this ground, and over you.</div>`;
     case 'player': return `<div class="log-line log-player">${entry.crit ? crit() + ' ' : ''}You strike for ${num(entry.dmg)}.</div>`;
     case 'spellDamage': return `<div class="log-line log-player">${entry.spell.icon} ${ent(entry.spell.name)}${entry.crit ? ' ' + crit() : ''} hits for ${num(entry.dmg)}.</div>`;
     case 'dotTick': return `<div class="log-line log-dot">${ent(entry.label)} burns for ${num(entry.dmg)}.</div>`;

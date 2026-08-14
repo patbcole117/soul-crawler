@@ -35,6 +35,7 @@ export function newCombatState() {
     playerDotTicks: [],
     playerShield: 0,
     playerShieldTurns: 0,
+    playerShieldDesc: null,
     enemyStunTurns: 0,
     playerStunTurns: 0,
   };
@@ -107,24 +108,24 @@ function resolveSpellCast(player, pStatsBase, pEff, enemy, spell, rank, c) {
       }
       if (spell.secondaryDebuff) {
         const d = spell.secondaryDebuff;
-        c.enemyEffects.push({ stat: d.stat, amount: d.ranks[idx], turnsLeft: d.turns, label: spell.name });
+        c.enemyEffects.push({ stat: d.stat, amount: d.ranks[idx], turnsLeft: d.turns, label: spell.name, desc: spell.desc });
         log.push({ type: 'debuffApplied', spell });
       }
       break;
     }
     case 'dot': {
       const dmgPerTurn = Math.max(1, Math.round(pEff.attack * spell.ranks[idx]));
-      c.enemyTicks.push({ dmgPerTurn, turnsLeft: spell.turns, label: spell.name });
+      c.enemyTicks.push({ dmgPerTurn, turnsLeft: spell.turns, label: spell.name, desc: spell.desc });
       log.push({ type: 'dotApplied', spell });
       break;
     }
     case 'buff': {
-      c.playerEffects.push({ stat: spell.stat, amount: spell.ranks[idx], turnsLeft: spell.turns, label: spell.name });
+      c.playerEffects.push({ stat: spell.stat, amount: spell.ranks[idx], turnsLeft: spell.turns, label: spell.name, desc: spell.desc });
       log.push({ type: 'buffApplied', spell });
       break;
     }
     case 'debuff': {
-      c.enemyEffects.push({ stat: spell.stat, amount: spell.ranks[idx], turnsLeft: spell.turns, label: spell.name });
+      c.enemyEffects.push({ stat: spell.stat, amount: spell.ranks[idx], turnsLeft: spell.turns, label: spell.name, desc: spell.desc });
       log.push({ type: 'debuffApplied', spell });
       break;
     }
@@ -142,6 +143,7 @@ function resolveSpellCast(player, pStatsBase, pEff, enemy, spell, rank, c) {
       const amt = Math.round(pStatsBase.maxHp * spell.ranks[idx] / 100);
       c.playerShield = (c.playerShield || 0) + amt;
       c.playerShieldTurns = Math.max(c.playerShieldTurns || 0, spell.turns);
+      c.playerShieldDesc = spell.desc;
       log.push({ type: 'shieldApplied', spell, amt });
       break;
     }
@@ -186,14 +188,14 @@ function resolveMonsterAbility(player, pStatsBase, pEff, enemy, ability, c) {
       break;
     }
     case 'dot': {
-      c.playerDotTicks.push({ dmgPerTurn: Math.max(1, Math.round(eEff.attack * ability.mult)), turnsLeft: ability.turns, label: ability.name });
+      c.playerDotTicks.push({ dmgPerTurn: Math.max(1, Math.round(eEff.attack * ability.mult)), turnsLeft: ability.turns, label: ability.name, desc: ability.desc });
       log.push({ type: 'abilityCast', ability });
       log.push({ type: 'enemyDotApplied', ability });
       break;
     }
     case 'debuffPlayer': {
       const scaled = Math.round(ability.amount * (1 + enemy.level * 0.03));
-      c.playerEffects.push({ stat: ability.stat, amount: scaled, turnsLeft: ability.turns, label: ability.name });
+      c.playerEffects.push({ stat: ability.stat, amount: scaled, turnsLeft: ability.turns, label: ability.name, desc: ability.desc });
       log.push({ type: 'abilityCast', ability });
       log.push({ type: 'enemyDebuffApplied', ability });
       break;

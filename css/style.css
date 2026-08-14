@@ -590,3 +590,15 @@ button { font-family: inherit; }
 .dungeon-screen.biome-rift .tile.t-floor, .dungeon-screen.biome-rift .tile.t-start {
   background-image: repeating-linear-gradient(45deg, rgba(255,60,120,0.09) 0 1px, transparent 1px 11px), repeating-linear-gradient(-45deg, rgba(120,60,255,0.07) 0 1px, transparent 1px 15px);
 }
+
+/* ---------- Ambient auras (shrines / hazards) ---------- */
+.active-auras-bar { display: flex; flex-wrap: wrap; gap: 0.35em; justify-content: center; padding: 0.4em 0.8em 0; }
+
+.tile.aura-buff, .tile.aura-debuff { cursor: help; font-size: 1.05rem; z-index: 1; }
+.tile.aura-buff { box-shadow: 0 0 10px 2px #3ddc84 inset; animation: auraPulseBuff 1.8s ease-in-out infinite; }
+.tile.aura-debuff { box-shadow: 0 0 10px 2px #a35dff inset; animation: auraPulseDebuff 1.8s ease-in-out infinite; }
+@keyframes auraPulseBuff { 0%, 100% { filter: brightness(1); } 50% { filter: brightness(1.35); } }
+@keyframes auraPulseDebuff { 0%, 100% { filter: brightness(1); } 50% { filter: brightness(1.3) hue-rotate(8deg); } }
+
+.tile.in-aura-buff { background-color: rgba(61,220,132,0.1); }
+.tile.in-aura-debuff { background-color: rgba(163,93,255,0.13); }

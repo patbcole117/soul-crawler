@@ -1,6 +1,7 @@
 import { DUNGEONS, FINAL_DUNGEON, dungeonHue, BIOME_INFO } from './data.js';
 import { enemyPower } from './combat.js';
 import { generateMonsterName, rollEnemyTier, rollAbilities, rollUniqueMonster } from './bestiary.js';
+import { AMBIENT_AURAS } from './auras.js';
 import { choice, randInt } from './utils.js';
 
 const TIER_MULT = { normal: 1, magic: 1.15, rare: 1.35, unique: 1.65 };
@@ -137,13 +138,36 @@ export function generateDungeon(depthIndex, isFinal = false) {
   bossStat.abilities = rollAbilities(isFinal ? 3 : 2);
   enemies[`${bossPos.x},${bossPos.y}`] = bossStat;
 
+  // Ambient shrines/hazards: a handful of tiles that project a buff or debuff to the
+  // squares around them. Debuffs grow more common the deeper the dungeon.
+  const auras = {};
+  const auraCandidates = [...floorSet].filter(id2 => {
+    const x = id2 % size, y = Math.floor(id2 / size);
+    return grid[idx(size, x, y)] === 'floor';
+  });
+  for (let i = auraCandidates.length - 1; i > 0; i--) {
+    const j = randInt(0, i);
+    [auraCandidates[i], auraCandidates[j]] = [auraCandidates[j], auraCandidates[i]];
+  }
+  const auraCount = Math.min(auraCandidates.length, Math.max(2, Math.round(size / 9)));
+  const buffChance = 0.6 - (depthIndex / 27) * 0.35;
+  const buffAuras = AMBIENT_AURAS.filter(a => a.kind === 'buff');
+  const debuffAuras = AMBIENT_AURAS.filter(a => a.kind === 'debuff');
+  for (let i = 0; i < auraCount; i++) {
+    const id2 = auraCandidates[i];
+    const x = id2 % size, y = Math.floor(id2 / size);
+    const pool = Math.random() < buffChance ? buffAuras : debuffAuras;
+    auras[`${x},${y}`] = choice(pool).id;
+  }
+
   // Purely cosmetic foliage/ground detail sprinkled on whatever floor tiles are left.
   const biome = BIOME_INFO[theme.biome] || BIOME_INFO.stone;
   const decorations = {};
   for (const id2 of floorSet) {
     const x = id2 % size, y = Math.floor(id2 / size);
-    if (grid[idx(size, x, y)] === 'floor' && Math.random() < 0.14) {
-      decorations[`${x},${y}`] = choice(biome.deco);
+    const key = `${x},${y}`;
+    if (grid[idx(size, x, y)] === 'floor' && !auras[key] && Math.random() < 0.14) {
+      decorations[key] = choice(biome.deco);
     }
   }
 
@@ -151,7 +175,7 @@ export function generateDungeon(depthIndex, isFinal = false) {
     depthIndex, isFinal,
     name: theme.name, flavor: theme.flavor, biome: theme.biome,
     hue: isFinal ? 0 : dungeonHue(depthIndex),
-    size, grid, startPos, bossPos, enemies, decorations,
+    size, grid, startPos, bossPos, enemies, decorations, auras,
     playerPos: { ...startPos },
     revealed: new Set([`${startPos.x},${startPos.y}`]),
     cleared: false,
