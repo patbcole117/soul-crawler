@@ -16,6 +16,7 @@ import {
   classCardHTML, classDetailHTML, spellButtonHTML, skillRowHTML, shopStockCardHTML,
 } from './ui.js';
 import { createVfxLayer, VFX_PRESETS, shakeEl, flashEl, spawnDamagePop, spawnProjectile, spawnMeleeSwipe, sleep } from './vfx.js';
+import { ensureAudio, toggleMute, isMuted, sfx, music } from './audio.js';
 import { randInt, fmt } from './utils.js';
 
 const root = document.getElementById('app');
@@ -60,12 +61,15 @@ function openModal(title, body, buttons, onAction) {
 function goTown() {
   G.screen = 'town';
   G.selectedItemId = null;
+  music.setCombatIntensity(false);
+  music.playTown();
   render();
 }
 
 function goClassSelect() {
   G.screen = 'classSelect';
   G.classPreview = null;
+  music.playClassSelect();
   render();
 }
 
@@ -77,6 +81,7 @@ function enterDungeon(index, isFinal) {
   G.screen = 'dungeon';
   G.selectedItemId = null;
   G.dungeonGearOpen = false;
+  music.playDungeon(index, isFinal);
   persist();
   render();
 }
@@ -108,6 +113,7 @@ function handleChest(x, y) {
   const ok = addItemToInventory(G.player, item);
   if (ok) toast(`Found ${item.name}!`);
   else { G.player.gold += item.sellValue; toast(`Inventory full — auto-sold ${item.name} for ${item.sellValue}g`); }
+  sfx.loot(item.rarityIdx);
   persist();
 }
 
@@ -118,6 +124,7 @@ function handleGold(x, y) {
   const amt = Math.round(randInt(8, 20 + d.depthIndex * 3) * (1 + stats.goldFind / 100));
   G.player.gold += amt;
   toast(`+${amt} gold`);
+  sfx.gold();
   persist();
 }
 
@@ -126,6 +133,7 @@ function handleFountain(x, y) {
   setTile(d, x, y, 'floor');
   restoreFull(G.player);
   toast('The fountain restores you fully.');
+  sfx.spellHeal();
   persist();
 }
 
@@ -142,6 +150,7 @@ function startCombat(enemy, pos) {
     result: null, locked: false, vfx: null, ...newCombatState(),
   };
   G.screen = 'combat';
+  music.setCombatIntensity(true);
   render();
 }
 
@@ -184,6 +193,8 @@ function performRound(action) {
     }
     c.result = 'victory';
     persist();
+    sfx.victory();
+    if (levels > 0) setTimeout(() => sfx.levelUp(), 220);
   } else if (res.playerDefeated) {
     c.locked = true;
     stopAuto();
@@ -193,6 +204,7 @@ function performRound(action) {
     p.hp = Math.max(1, Math.round(maxStats(p).maxHp * 0.3));
     c.result = 'defeat';
     persist();
+    sfx.defeat();
   }
   render();
 }
@@ -250,12 +262,14 @@ function finishCombat() {
   const c = G.combat;
   if (!c) return;
   const d = G.dungeon;
+  music.setCombatIntensity(false);
   if (c.result === 'victory') {
     setTile(d, c.pos.x, c.pos.y, 'floor');
     d.playerPos = { ...c.pos };
     revealAround(d, c.pos.x, c.pos.y, 2);
     const kind = c.enemy.kind;
     G.combat = null;
+    G.screen = 'town'; // safe fallback while the boss-clear modal / ending cutscene take over
     if (kind === 'boss') { handleDungeonCleared(d.depthIndex); return; }
     if (kind === 'final') { handleFinalCleared(); return; }
     G.screen = 'dungeon';
@@ -299,6 +313,7 @@ function handleFinalCleared() {
 function startCutscene(slides, onDone) {
   G.cutscene = { slides, index: 0, particles: null, onDone };
   G.screen = 'cutscene';
+  music.playCutscene();
   render();
 }
 
@@ -360,6 +375,11 @@ function gambleWheelHTML() {
 // ---------- Rendering ----------
 
 function render() {
+  // Defensive fallbacks: never let the screen point at state that no longer exists.
+  if (G.screen === 'combat' && !G.combat) G.screen = G.dungeon ? 'dungeon' : 'town';
+  if (G.screen === 'dungeon' && !G.dungeon) G.screen = 'town';
+  if ((G.screen === 'town' || G.screen === 'dungeon') && !G.player) G.screen = 'classSelect';
+
   if (G.screen === 'cutscene') renderCutscene();
   else if (G.screen === 'classSelect') renderClassSelect();
   else if (G.screen === 'town') renderTown();
@@ -436,6 +456,7 @@ function renderTown() {
         <span class="pgold">🪙 ${fmt(p.gold)}</span>
         <span class="ppotion">🧪 x${p.potions}</span>
       </div>
+      <button class="btn btn-ghost" data-action="toggle-mute" title="${isMuted() ? 'Unmute' : 'Mute'}">${isMuted() ? '🔇' : '🔊'}</button>
       <button class="btn btn-ghost" data-action="open-settings" title="New Game">⚙</button>
     </header>
     <div class="town-body">
@@ -587,6 +608,9 @@ function renderDungeon() {
         const enemyObj = d.enemies[key];
         cls += tierBadge(enemyObj);
         if (enemyObj?.tier === 'unique' && enemyObj.icon) glyph = enemyObj.icon;
+      } else if (revealed && (type === 'floor' || type === 'start') && d.decorations[key]) {
+        cls += ' tile-deco';
+        glyph = d.decorations[key];
       }
       gridHTML += `<div class="${cls}" data-action="tile-click" data-x="${x}" data-y="${y}">${glyph}</div>`;
     }
@@ -594,7 +618,7 @@ function renderDungeon() {
   const lightX = ((d.playerPos.x + 0.5) / d.size) * 100;
   const lightY = ((d.playerPos.y + 0.5) / d.size) * 100;
   root.innerHTML = `
-  <div class="screen dungeon-screen" style="--hue:${d.hue}">
+  <div class="screen dungeon-screen biome-${d.biome}" style="--hue:${d.hue}">
     <canvas id="dungeon-particles" class="particles-canvas dim"></canvas>
     <header class="topbar">
       <button class="btn btn-ghost" data-action="retreat">← Town</button>
@@ -602,6 +626,7 @@ function renderDungeon() {
       <div class="player-brief">
         ${barHTML('hp small', p.hp, stats.maxHp)}
         <span class="ppotion">🧪x${p.potions}</span>
+        <button class="btn btn-ghost" data-action="toggle-mute" title="${isMuted() ? 'Unmute' : 'Mute'}">${isMuted() ? '🔇' : '🔊'}</button>
         <button class="btn btn-ghost" data-action="toggle-dungeon-gear" title="Gear">🎒</button>
       </div>
     </header>
@@ -748,12 +773,16 @@ async function runCombatVfx(vfx, projLayer, entries) {
   for (const e of entries) {
     switch (e.type) {
       case 'player':
+        sfx.attack();
+        if (e.crit) sfx.crit();
         await spawnMeleeSwipe(projLayer, '⚔️', ENEMY_POS);
         vfx.burst(ENEMY_POS[0], ENEMY_POS[1], VFX_PRESETS['attack-white']);
         shakeEl(enemyPortrait, 'sm'); flashEl(enemyPortrait, 'flash-hit');
         spawnDamagePop(enemyDmgLayer, e.crit ? `${e.dmg}!` : `${e.dmg}`, e.crit ? 'crit' : 'normal');
         break;
       case 'spellDamage': {
+        sfx.spellDamage();
+        if (e.crit) sfx.crit();
         await impactOnEnemy(e.spell);
         shakeEl(enemyPortrait, e.crit ? 'lg' : 'md'); flashEl(enemyPortrait, 'flash-hit');
         spawnDamagePop(enemyDmgLayer, e.crit ? `${e.dmg}!` : `${e.dmg}`, e.crit ? 'crit' : 'spell');
@@ -764,6 +793,7 @@ async function runCombatVfx(vfx, projLayer, entries) {
         spawnDamagePop(enemyDmgLayer, `${e.dmg}`, 'dot');
         break;
       case 'enemy': {
+        sfx.enemyHit();
         const preset = e.ability ? (VFX_PRESETS[e.ability.vfx] || VFX_PRESETS['enemy-hit-red']) : VFX_PRESETS['enemy-hit-red'];
         vfx.burst(PLAYER_POS[0], PLAYER_POS[1], preset);
         shakeEl(playerPortrait, 'sm'); flashEl(playerPortrait, 'flash-hit');
@@ -777,6 +807,7 @@ async function runCombatVfx(vfx, projLayer, entries) {
       case 'lifesteal':
       case 'hotTick':
       case 'spellHeal':
+        sfx.spellHeal();
         if (e.spell?.reverseProj) await spawnProjectile(projLayer, e.spell.reverseProj, ENEMY_POS, PLAYER_POS);
         vfx.burst(PLAYER_POS[0], PLAYER_POS[1], { ...(VFX_PRESETS[e.spell?.vfx || 'heal-green']), shape: 'rise' });
         spawnDamagePop(playerDmgLayer, `+${e.heal}`, 'heal');
@@ -787,12 +818,14 @@ async function runCombatVfx(vfx, projLayer, entries) {
         break;
       case 'buffApplied':
       case 'shieldApplied':
+        e.type === 'shieldApplied' ? sfx.spellShield() : sfx.spellBuff();
         vfx.burst(PLAYER_POS[0], PLAYER_POS[1], { ...(VFX_PRESETS[e.spell.vfx] || VFX_PRESETS.sparkle), shape: 'rise' });
         flashEl(playerPortrait, 'flash-buff');
         break;
       case 'debuffApplied':
       case 'dotApplied':
       case 'stunApplied':
+        e.type === 'stunApplied' ? sfx.stun() : sfx.spellDebuff();
         if (e.spell.proj) await spawnProjectile(projLayer, e.spell.proj, PLAYER_POS, ENEMY_POS);
         vfx.smite(ENEMY_POS[0], ENEMY_POS[1], VFX_PRESETS[e.spell.vfx] || VFX_PRESETS.hex);
         flashEl(enemyPortrait, 'flash-hit');
@@ -803,6 +836,7 @@ async function runCombatVfx(vfx, projLayer, entries) {
         vfx.burst(PLAYER_POS[0], PLAYER_POS[1], { ...(VFX_PRESETS[e.ability.vfx] || VFX_PRESETS.hex), shape: 'cloud' });
         break;
       case 'enemyDebuffApplied':
+        sfx.spellDebuff();
         vfx.smite(PLAYER_POS[0], PLAYER_POS[1], VFX_PRESETS[e.ability.vfx] || VFX_PRESETS.hex);
         flashEl(playerPortrait, 'flash-hit');
         break;
@@ -814,6 +848,7 @@ async function runCombatVfx(vfx, projLayer, entries) {
         vfx.burst(ENEMY_POS[0], ENEMY_POS[1], { ...(VFX_PRESETS[e.ability.vfx] || VFX_PRESETS.roar), shape: 'rise' });
         break;
       case 'playerStunApplied':
+        sfx.stun();
         vfx.smite(PLAYER_POS[0], PLAYER_POS[1], VFX_PRESETS.impact);
         shakeEl(screenEl, 'md');
         break;
@@ -825,6 +860,7 @@ async function runCombatVfx(vfx, projLayer, entries) {
         spawnDamagePop(playerDmgLayer, `🛡${e.amt}`, 'shield');
         break;
       case 'dodge':
+        sfx.dodge();
         spawnDamagePop(playerDmgLayer, 'Dodge!', 'dodge');
         break;
       case 'enemyDefeated':
@@ -911,47 +947,48 @@ const actions = {
         }
       });
   },
-  'preview-class': (btn) => { G.classPreview = btn.dataset.classKey; render(); },
+  'preview-class': (btn) => { sfx.navigate(); G.classPreview = btn.dataset.classKey; render(); },
   'confirm-class': () => {
     if (!G.classPreview) return;
     if (G.player) applyClass(G.player, G.classPreview);
     else G.player = newPlayer('Wanderer', G.classPreview);
     G.classPreview = null;
     persist();
+    sfx.levelUp();
     goTown();
   },
-  'town-tab': (btn) => { G.townTab = btn.dataset.tab; G.selectedItemId = null; render(); },
-  'select-item': (btn) => { G.selectedItemId = btn.dataset.itemId; render(); },
+  'town-tab': (btn) => { sfx.navigate(); G.townTab = btn.dataset.tab; G.selectedItemId = null; render(); },
+  'select-item': (btn) => { sfx.click(); G.selectedItemId = btn.dataset.itemId; render(); },
   'select-equipped': (btn) => {
     const item = G.player.equipment[btn.dataset.slot];
-    if (item) G.selectedItemId = item.id;
+    if (item) { sfx.click(); G.selectedItemId = item.id; }
     render();
   },
   'equip': (btn) => {
     const item = G.player.inventory.find(i => i.id === btn.dataset.itemId);
-    if (item) { equipItem(G.player, item); clampHp(G.player); persist(); }
+    if (item) { equipItem(G.player, item); clampHp(G.player); persist(); sfx.equip(); }
     render();
   },
   'unequip': (btn) => {
     const ok = unequipItem(G.player, btn.dataset.slot);
     if (!ok) toast('Inventory full!');
-    else { G.selectedItemId = null; persist(); }
+    else { G.selectedItemId = null; persist(); sfx.unequip(); }
     render();
   },
   'sell': (btn) => {
     const val = sellItem(G.player, btn.dataset.itemId);
-    if (val > 0) { G.selectedItemId = null; persist(); toast(`Sold for ${val}g`); }
+    if (val > 0) { G.selectedItemId = null; persist(); toast(`Sold for ${val}g`); sfx.sell(); }
     render();
   },
   'learn-spell': (btn) => {
     const res = learnOrUpgradeSpell(G.player, btn.dataset.spellId);
     if (!res.ok) toast(res.reason);
-    else { toast('Spell learned!'); persist(); }
+    else { toast('Spell learned!'); persist(); sfx.spellBuff(); }
     render();
   },
   'buy-potion': () => {
     const cost = 15;
-    if (G.player.gold >= cost) { G.player.gold -= cost; G.player.potions++; persist(); toast('Potion purchased.'); }
+    if (G.player.gold >= cost) { G.player.gold -= cost; G.player.potions++; persist(); toast('Potion purchased.'); sfx.gold(); }
     else toast('Not enough gold.');
     render();
   },
@@ -961,6 +998,7 @@ const actions = {
     let total = 0;
     for (const it of junk) total += sellItem(p, it.id);
     toast(total > 0 ? `Sold junk for ${total}g` : 'No junk to sell.');
+    if (total > 0) sfx.sell();
     persist();
     render();
   },
@@ -977,6 +1015,7 @@ const actions = {
     addItemToInventory(p, item);
     persist();
     toast(`Bought ${item.name}!`);
+    sfx.gold();
     render();
   },
   'refresh-shop': () => {
@@ -985,6 +1024,7 @@ const actions = {
     if (p.gold < cost) { toast('Not enough gold.'); render(); return; }
     p.gold -= cost;
     p.shop = { stock: generateShopStock(shopDepth(p)) };
+    sfx.gold();
     persist();
     render();
   },
@@ -1004,6 +1044,7 @@ const actions = {
     const delta = spins * 360 + (((360 - landAngle) - prevMod) + 360) % 360;
     G.gamble = { spinning: true, rotation: prevRotation + delta, resultItem: null, targetIdx };
     persist();
+    sfx.gambleSpin();
     render();
     setTimeout(() => {
       const item = generateItem(depth, { forceRarityIndex: G.gamble.targetIdx, bonusTier: 0.2 });
@@ -1015,6 +1056,7 @@ const actions = {
         p.gold += item.sellValue;
         toast(`Inventory full — auto-sold ${item.name} for ${item.sellValue}g`);
       }
+      sfx.loot(item.rarityIdx);
       persist();
       render();
     }, 3300);
@@ -1026,7 +1068,8 @@ const actions = {
       [{ label: 'Stay', action: 'cancel' }, { label: 'Retreat', action: 'confirm', primary: true }],
       (act) => { if (act === 'confirm') { stopDungeonParticles(); G.dungeon = null; goTown(); } });
   },
-  'toggle-dungeon-gear': () => { G.dungeonGearOpen = !G.dungeonGearOpen; G.selectedItemId = null; render(); },
+  'toggle-dungeon-gear': () => { sfx.click(); G.dungeonGearOpen = !G.dungeonGearOpen; G.selectedItemId = null; render(); },
+  'toggle-mute': () => { const nowMuted = toggleMute(); if (!nowMuted) sfx.toggle(); render(); },
   'move': (btn) => attemptMove(parseInt(btn.dataset.dx, 10), parseInt(btn.dataset.dy, 10)),
   'tile-click': (btn) => {
     const x = parseInt(btn.dataset.x, 10), y = parseInt(btn.dataset.y, 10);
@@ -1045,12 +1088,13 @@ const actions = {
       c.log.push(entry);
       c.lastRoundLog = [entry];
       persist();
+      sfx.potion();
     }
     render();
   },
   'combat-stunned-continue': () => performRound({ kind: 'stunned' }),
   'combat-auto': () => toggleAuto(),
-  'combat-flee': () => { stopAuto(); G.combat = null; G.screen = 'dungeon'; render(); },
+  'combat-flee': () => { stopAuto(); music.setCombatIntensity(false); G.combat = null; G.screen = 'dungeon'; render(); },
   'combat-continue': () => finishCombat(),
   'cutscene-next': () => advanceCutscene(),
   'cutscene-skip': () => endCutscene(),
@@ -1059,10 +1103,12 @@ const actions = {
     const act = btn.dataset.modalAction;
     G.modal = null;
     cb?.(act);
+    render();
   },
 };
 
 document.addEventListener('click', (e) => {
+  ensureAudio();
   const btn = e.target.closest('[data-action]');
   if (!btn) return;
   const action = btn.dataset.action;

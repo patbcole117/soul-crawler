@@ -1,4 +1,4 @@
-import { DUNGEONS, FINAL_DUNGEON, dungeonHue } from './data.js';
+import { DUNGEONS, FINAL_DUNGEON, dungeonHue, BIOME_INFO } from './data.js';
 import { enemyPower } from './combat.js';
 import { generateMonsterName, rollEnemyTier, rollAbilities, rollUniqueMonster } from './bestiary.js';
 import { choice, randInt } from './utils.js';
@@ -41,7 +41,8 @@ function bfsDistances(grid, size, start) {
 
 export function generateDungeon(depthIndex, isFinal = false) {
   const theme = isFinal ? FINAL_DUNGEON : DUNGEONS[depthIndex - 1];
-  const size = isFinal ? 13 : Math.min(13, 7 + Math.floor((depthIndex - 1) / 4));
+  // Dungeons grow from tight rooms into sprawling labyrinths as the player descends.
+  const size = isFinal ? 37 : Math.min(33, 9 + Math.round((depthIndex - 1) * (24 / 26)));
   const grid = new Array(size * size).fill('wall');
   let cur = { x: Math.floor(size / 2), y: Math.floor(size / 2) };
   const startPos = { ...cur };
@@ -81,11 +82,11 @@ export function generateDungeon(depthIndex, isFinal = false) {
   }
 
   const counts = {
-    enemy: Math.min(remaining.length, 6 + Math.floor(depthIndex / 3)),
-    elite: depthIndex >= 5 ? (depthIndex >= 15 ? 2 : 1) : 0,
-    chest: 3,
-    gold: 3,
-    fountain: 1,
+    enemy: Math.min(remaining.length, Math.round(size * 0.85 + depthIndex * 0.3)),
+    elite: depthIndex >= 5 ? Math.min(6, 1 + Math.floor(size / 11)) : 0,
+    chest: Math.max(3, Math.round(size / 3.5)),
+    gold: Math.max(3, Math.round(size / 2.5)),
+    fountain: Math.max(1, Math.round(size / 14)),
   };
 
   const enemies = {};
@@ -136,10 +137,21 @@ export function generateDungeon(depthIndex, isFinal = false) {
   bossStat.abilities = rollAbilities(isFinal ? 3 : 2);
   enemies[`${bossPos.x},${bossPos.y}`] = bossStat;
 
+  // Purely cosmetic foliage/ground detail sprinkled on whatever floor tiles are left.
+  const biome = BIOME_INFO[theme.biome] || BIOME_INFO.stone;
+  const decorations = {};
+  for (const id2 of floorSet) {
+    const x = id2 % size, y = Math.floor(id2 / size);
+    if (grid[idx(size, x, y)] === 'floor' && Math.random() < 0.14) {
+      decorations[`${x},${y}`] = choice(biome.deco);
+    }
+  }
+
   return {
     depthIndex, isFinal,
-    name: theme.name, flavor: theme.flavor, hue: isFinal ? 0 : dungeonHue(depthIndex),
-    size, grid, startPos, bossPos, enemies,
+    name: theme.name, flavor: theme.flavor, biome: theme.biome,
+    hue: isFinal ? 0 : dungeonHue(depthIndex),
+    size, grid, startPos, bossPos, enemies, decorations,
     playerPos: { ...startPos },
     revealed: new Set([`${startPos.x},${startPos.y}`]),
     cleared: false,
