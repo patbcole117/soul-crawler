@@ -1,7 +1,11 @@
 // Fully synthesized audio (no external files) via the Web Audio API — safe for an
-// offline/embedded context. Music is generative: a handful of oscillators forming a
-// drone chord whose root pitch, dissonance, and tempo are driven by dungeon depth, so
-// every dungeon has a distinct feel that drifts from calm to menacing as you descend.
+// offline/embedded context. Music is a small generative composition engine: a chord
+// progression drawn from a scale/mode, a rhythmic bass and percussion, and an
+// arpeggiated lead voice run through delay + convolution reverb. Depth (t, 0-1) drives
+// the mode (major -> minor -> phrygian -> dark), tempo, register, and density, so the
+// soundtrack drifts from a calm, open theme in town toward something dense and
+// dissonant by the deepest dungeons — while a seed per dungeon keeps each one distinct
+// but stable across visits.
 
 const MUTE_KEY = 'soulrift_muted';
 
@@ -11,7 +15,29 @@ let musicGain = null;
 let sfxGain = null;
 let muted = false;
 
+// persistent music-only routing (built once, reused by every composition)
+let musicBus = null;      // everything musical connects here
+let reverbConvolver = null;
+let reverbWet = null;
+let leadBus = null;       // dry lead send
+let leadDelay = null;
+let leadFeedback = null;
+let leadDelayFilter = null;
+
 export function isMuted() { return muted; }
+
+function makeImpulse(duration = 2.4, decay = 2.6) {
+  const rate = ctx.sampleRate;
+  const length = Math.max(1, Math.floor(rate * duration));
+  const impulse = ctx.createBuffer(2, length, rate);
+  for (let ch = 0; ch < 2; ch++) {
+    const data = impulse.getChannelData(ch);
+    for (let i = 0; i < length; i++) {
+      data[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / length, decay);
+    }
+  }
+  return impulse;
+}
 
 export function initAudio() {
   if (ctx) return;
@@ -22,11 +48,41 @@ export function initAudio() {
     masterGain = ctx.createGain();
     masterGain.connect(ctx.destination);
     musicGain = ctx.createGain();
-    musicGain.gain.value = 0.32;
+    musicGain.gain.value = 0.34;
     musicGain.connect(masterGain);
     sfxGain = ctx.createGain();
     sfxGain.gain.value = 0.7;
     sfxGain.connect(masterGain);
+
+    // Music bus fans out to a dry path and a convolution-reverb send for space.
+    musicBus = ctx.createGain();
+    musicBus.gain.value = 1;
+    musicBus.connect(musicGain);
+    reverbConvolver = ctx.createConvolver();
+    reverbConvolver.buffer = makeImpulse();
+    reverbWet = ctx.createGain();
+    reverbWet.gain.value = 0.26;
+    musicBus.connect(reverbConvolver);
+    reverbConvolver.connect(reverbWet);
+    reverbWet.connect(musicGain);
+
+    // Lead voice gets its own feedback delay (echo) in addition to the shared reverb.
+    leadBus = ctx.createGain();
+    leadBus.gain.value = 1;
+    leadBus.connect(musicBus);
+    leadDelay = ctx.createDelay(1.2);
+    leadDelay.delayTime.value = 0.32;
+    leadDelayFilter = ctx.createBiquadFilter();
+    leadDelayFilter.type = 'lowpass';
+    leadDelayFilter.frequency.value = 2200;
+    leadFeedback = ctx.createGain();
+    leadFeedback.gain.value = 0.34;
+    leadBus.connect(leadDelay);
+    leadDelay.connect(leadDelayFilter);
+    leadDelayFilter.connect(leadFeedback);
+    leadFeedback.connect(leadDelay);
+    leadDelay.connect(musicBus);
+
     try { muted = localStorage.getItem(MUTE_KEY) === '1'; } catch (e) { muted = false; }
     masterGain.gain.value = muted ? 0 : 1;
   } catch (e) { ctx = null; }
@@ -48,33 +104,37 @@ export function toggleMute() {
 
 // ---------- low-level synthesis helpers ----------
 
-function envGain(dest, { attack = 0.01, decay = 0.1, sustain = 0, release = 0.12, peak = 0.3 }) {
+function envGainAt(dest, time, { attack = 0.01, decay = 0.1, sustain = 0, release = 0.12, peak = 0.3 }) {
   const g = ctx.createGain();
   g.connect(dest);
-  const t0 = ctx.currentTime;
-  g.gain.setValueAtTime(0.0001, t0);
-  g.gain.exponentialRampToValueAtTime(Math.max(0.001, peak), t0 + attack);
+  g.gain.setValueAtTime(0.0001, time);
+  g.gain.exponentialRampToValueAtTime(Math.max(0.001, peak), time + attack);
   const sustainLevel = Math.max(0.0001, peak * sustain);
-  g.gain.exponentialRampToValueAtTime(sustainLevel, t0 + attack + decay);
-  g.gain.setValueAtTime(sustainLevel, t0 + attack + decay);
-  g.gain.exponentialRampToValueAtTime(0.0001, t0 + attack + decay + release);
-  return { gainNode: g, stopTime: t0 + attack + decay + release + 0.05 };
+  g.gain.exponentialRampToValueAtTime(sustainLevel, time + attack + decay);
+  g.gain.setValueAtTime(sustainLevel, time + attack + decay);
+  g.gain.exponentialRampToValueAtTime(0.0001, time + attack + decay + release);
+  return { gainNode: g, stopTime: time + attack + decay + release + 0.05 };
 }
 
-function tone(freq, opts = {}) {
+function toneAt(freq, time, opts = {}) {
   if (!ctx) return;
   const { type = 'sine', detune = 0, dest = null } = opts;
   const osc = ctx.createOscillator();
   osc.type = type;
   osc.frequency.value = freq;
   osc.detune.value = detune;
-  const { gainNode, stopTime } = envGain(dest || sfxGain, opts);
+  const { gainNode, stopTime } = envGainAt(dest || sfxGain, time, opts);
   osc.connect(gainNode);
-  osc.start();
+  osc.start(time);
   osc.stop(stopTime);
 }
 
-function noiseBurst({ duration = 0.15, peak = 0.2, filterFreq = 1800, filterType = 'bandpass', dest = null } = {}) {
+function tone(freq, opts = {}) {
+  if (!ctx) return;
+  toneAt(freq, ctx.currentTime, opts);
+}
+
+function noiseBurstAt(time, { duration = 0.15, peak = 0.2, filterFreq = 1800, filterType = 'bandpass', dest = null } = {}) {
   if (!ctx) return;
   const size = Math.max(1, Math.floor(ctx.sampleRate * duration));
   const buffer = ctx.createBuffer(1, size, ctx.sampleRate);
@@ -86,9 +146,14 @@ function noiseBurst({ duration = 0.15, peak = 0.2, filterFreq = 1800, filterType
   filter.type = filterType;
   filter.frequency.value = filterFreq;
   const g = ctx.createGain();
-  g.gain.value = peak;
+  g.gain.setValueAtTime(peak, time);
   src.connect(filter); filter.connect(g); g.connect(dest || sfxGain);
-  src.start();
+  src.start(time);
+}
+
+function noiseBurst(opts = {}) {
+  if (!ctx) return;
+  noiseBurstAt(ctx.currentTime, opts);
 }
 
 function arpeggio(root, intervals, opts = {}, stagger = 55) {
@@ -129,97 +194,212 @@ export const sfx = {
   toggle() { ensureAudio(); tone(600, { type: 'sine', peak: 0.06, decay: 0.03, release: 0.06 }); },
 };
 
-// ---------- generative music ----------
+// ---------- music theory ----------
 
-let musicNodes = null;
-let currentMusicKey = null;
-let combatPulseTimer = null;
-
-function stopMusic() {
-  if (musicNodes) {
-    musicNodes.oscillators.forEach((o) => { try { o.stop(); } catch (e) { /* already stopped */ } });
-    if (musicNodes.stingerTimer) clearTimeout(musicNodes.stingerTimer);
-    musicNodes = null;
-  }
-  currentMusicKey = null;
+function mulberry32(seed) {
+  let a = seed >>> 0;
+  return function () {
+    a |= 0; a = (a + 0x6D2B79F5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
 }
 
-function startPad(t, key) {
-  if (!ctx || currentMusicKey === key) return;
-  stopMusic();
-  currentMusicKey = key;
+const SCALES = {
+  major: [0, 2, 4, 5, 7, 9, 11],
+  minor: [0, 2, 3, 5, 7, 8, 10],
+  phrygian: [0, 1, 3, 5, 7, 8, 10],
+  dark: [0, 1, 3, 5, 6, 8, 10],
+};
 
-  const root = 110 * Math.pow(2, -t * 0.55);
-  const brightIntervals = [0, 7, 12, 16];
-  const darkIntervals = [0, 6, 11, 13];
-  const intervals = brightIntervals.map((iv, i) => iv + t * (darkIntervals[i] - iv));
+// Progressions as 0-indexed scale degrees (triads built diatonically from each degree).
+const PROGRESSIONS = {
+  major: [[0, 4, 5, 3], [0, 3, 4, 4]],
+  minor: [[0, 5, 2, 6], [0, 3, 4, 0]],
+  phrygian: [[0, 1, 4, 0], [0, 6, 1, 0]],
+  dark: [[0, 1, 0, 4], [0, 3, 1, 0]],
+};
 
-  const padGain = ctx.createGain();
-  padGain.gain.value = 0.0001;
+function modeForT(t) {
+  if (t < 0.32) return 'major';
+  if (t < 0.68) return 'minor';
+  if (t < 0.92) return 'phrygian';
+  return 'dark';
+}
+
+function degreeToChordSemis(scale, degree) {
+  return [degree, degree + 2, degree + 4].map((i) => {
+    const oct = Math.floor(i / 7);
+    return scale[((i % 7) + 7) % 7] + oct * 12;
+  });
+}
+
+// ---------- pad voice (crossfaded on chord changes) ----------
+
+function createPadVoice(freqs, filterFreq) {
+  const gain = ctx.createGain();
+  gain.gain.value = 0.0001;
   const filter = ctx.createBiquadFilter();
   filter.type = 'lowpass';
-  filter.frequency.value = 950 - t * 400;
-  padGain.connect(filter);
-  filter.connect(musicGain);
-
-  const oscillators = [];
-  intervals.forEach((iv, i) => {
-    const osc = ctx.createOscillator();
-    osc.type = i === 0 ? 'sine' : (t > 0.65 ? 'sawtooth' : 'triangle');
-    osc.frequency.value = root * Math.pow(2, iv / 12);
-    osc.detune.value = (Math.random() - 0.5) * 6;
-    const g = ctx.createGain();
-    g.gain.value = 0.55 / (i + 1);
-    osc.connect(g); g.connect(padGain);
-    osc.start();
-    oscillators.push(osc);
+  filter.frequency.value = filterFreq;
+  gain.connect(filter);
+  filter.connect(musicBus);
+  const oscs = freqs.map((f, i) => {
+    const o = ctx.createOscillator();
+    o.type = i === 0 ? 'sine' : 'triangle';
+    o.frequency.value = f;
+    o.detune.value = (Math.random() - 0.5) * 5;
+    const og = ctx.createGain();
+    og.gain.value = 1 / (i + 1.3);
+    o.connect(og); og.connect(gain);
+    o.start();
+    return o;
   });
+  return {
+    fadeIn(dur, level) {
+      gain.gain.cancelScheduledValues(ctx.currentTime);
+      gain.gain.setTargetAtTime(level, ctx.currentTime, dur / 3);
+    },
+    fadeOut(dur) {
+      gain.gain.cancelScheduledValues(ctx.currentTime);
+      gain.gain.setTargetAtTime(0.0001, ctx.currentTime, dur / 3);
+      setTimeout(() => { oscs.forEach((o) => { try { o.stop(); } catch (e) { /* already stopped */ } }); }, dur * 1000 + 300);
+    },
+  };
+}
 
-  const lfo = ctx.createOscillator();
-  lfo.frequency.value = 0.05 + t * 0.06;
-  const lfoGain = ctx.createGain();
-  lfoGain.gain.value = 140;
-  lfo.connect(lfoGain); lfoGain.connect(filter.frequency);
-  lfo.start();
-  oscillators.push(lfo);
+function kickAt(time, peak) {
+  if (!ctx) return;
+  const osc = ctx.createOscillator();
+  osc.type = 'sine';
+  osc.frequency.setValueAtTime(150, time);
+  osc.frequency.exponentialRampToValueAtTime(45, time + 0.12);
+  const g = ctx.createGain();
+  g.gain.setValueAtTime(peak, time);
+  g.gain.exponentialRampToValueAtTime(0.001, time + 0.28);
+  osc.connect(g); g.connect(musicBus);
+  osc.start(time); osc.stop(time + 0.3);
+}
 
-  padGain.gain.setTargetAtTime(0.4, ctx.currentTime, 1.4);
+function hatAt(time, peak) {
+  noiseBurstAt(time, { duration: 0.045, peak, filterFreq: 7500, filterType: 'highpass', dest: musicBus });
+}
 
-  const state = { oscillators, padGain, filter, stingerTimer: null };
-  musicNodes = state;
+// ---------- scheduler ----------
 
-  function scheduleStinger() {
-    const delay = Math.max(1800, (4.5 + Math.random() * 5 - t * 2) * 1000);
-    state.stingerTimer = setTimeout(() => {
-      if (currentMusicKey !== key || !ctx) return;
-      const iv = intervals[Math.floor(Math.random() * intervals.length)] + (Math.random() < 0.25 + t * 0.4 ? (Math.random() < 0.5 ? -1 : 1) : 0);
-      tone(root * 2 * Math.pow(2, iv / 12), { type: t > 0.5 ? 'sawtooth' : 'sine', peak: 0.045 + t * 0.05, attack: 0.02, decay: 0.3, release: 0.6, dest: musicGain });
-      scheduleStinger();
-    }, delay);
+let schedulerTimer = null;
+let nextNoteTime = 0;
+let compositionState = null;
+let currentKey = null;
+let combatIntensity = false;
+
+const ARP_PATTERN = [0, 1, 2, 1, 0, 2, 1, 3];
+
+function changeChord(state, time) {
+  state.chordIdx = (state.chordIdx + 1) % state.progression.length;
+  const degree = state.progression[state.chordIdx];
+  const semis = degreeToChordSemis(state.scale, degree);
+  const freqs = semis.map((s) => state.chordRootFreq * Math.pow(2, s / 12));
+  state.currentChordFreqs = freqs;
+  const padFreqs = [freqs[0] / 2, freqs[0], freqs[1], freqs[2], freqs[0] * 2];
+  const filterFreq = 900 - state.t * 350;
+  const newPad = createPadVoice(padFreqs, filterFreq);
+  newPad.fadeIn(1.6, 0.24 + state.t * 0.06);
+  if (state.padVoice) state.padVoice.fadeOut(1.6);
+  state.padVoice = newPad;
+}
+
+function scheduleStep(state, step, time) {
+  const posInBar = step % 16;
+  const stepsPerChord = state.barsPerChord * 16;
+  if (step % stepsPerChord === 0) changeChord(state, time);
+  const chord = state.currentChordFreqs;
+  const rng = state.rng;
+  const intensity = combatIntensity ? 0.18 : 0;
+
+  if (posInBar === 0 || posInBar === 8) {
+    toneAt(chord[0] / 2, time, { type: 'triangle', peak: 0.22 + intensity * 0.3, attack: 0.008, decay: 0.16, release: 0.32, dest: musicBus });
+  } else if ((state.t > 0.5 || combatIntensity) && posInBar === 12 && rng() < 0.45) {
+    toneAt(chord[0] / 2, time, { type: 'sawtooth', peak: 0.15 + intensity * 0.2, attack: 0.005, decay: 0.1, release: 0.2, dest: musicBus });
   }
-  scheduleStinger();
+
+  if (posInBar % 8 === 0) kickAt(time, 0.26 + intensity);
+  const hatProb = 0.42 + state.t * 0.3 + intensity;
+  if (posInBar % 2 === 0 && rng() < hatProb) hatAt(time, 0.045 + state.t * 0.025);
+
+  if (posInBar % 2 === 0) {
+    const density = 0.32 + state.t * 0.42 + intensity;
+    if (rng() < density) {
+      state.arpStep = (state.arpStep || 0) + 1;
+      let idx;
+      if (rng() < 0.2) idx = Math.floor(rng() * chord.length);
+      else idx = ARP_PATTERN[state.arpStep % ARP_PATTERN.length] % chord.length;
+      let freq = chord[idx];
+      if (rng() < 0.5) freq *= 2;
+      if (rng() < 0.09 + state.t * 0.14) freq *= Math.pow(2, (rng() < 0.5 ? -1 : 1) / 12);
+      toneAt(freq, time, { type: state.t > 0.6 ? 'sawtooth' : 'triangle', peak: 0.1, attack: 0.004, decay: 0.12, release: 0.32, dest: leadBus });
+    }
+  }
+}
+
+function schedulerTick() {
+  const state = compositionState;
+  if (!state || !ctx) return;
+  while (nextNoteTime < ctx.currentTime + 0.12) {
+    scheduleStep(state, state.step, nextNoteTime);
+    nextNoteTime += state.secondsPer16th;
+    state.step++;
+  }
+}
+
+function stopComposition() {
+  if (schedulerTimer) { clearInterval(schedulerTimer); schedulerTimer = null; }
+  if (compositionState?.padVoice) compositionState.padVoice.fadeOut(1.0);
+  compositionState = null;
+  currentKey = null;
+}
+
+function startComposition(t, seed, key) {
+  if (!ctx || currentKey === key) return;
+  stopComposition();
+  currentKey = key;
+
+  const rng = mulberry32(seed >>> 0);
+  const mode = modeForT(t);
+  const scale = SCALES[mode];
+  const progVariants = PROGRESSIONS[mode];
+  const progression = progVariants[Math.floor(rng() * progVariants.length)];
+  const transpose = Math.floor(rng() * 3);
+
+  const bassMidi = 31 - Math.round(t * 6) + transpose;
+  const bassFreq = 440 * Math.pow(2, (bassMidi - 69) / 12);
+  const chordRootFreq = bassFreq * 4;
+  const bpm = 60 + t * 26;
+  const secondsPer16th = (60 / bpm) / 4;
+
+  if (leadDelay) leadDelay.delayTime.setTargetAtTime((60 / bpm) * 0.75, ctx.currentTime, 0.1);
+
+  compositionState = {
+    step: 0, chordIdx: -1, arpStep: 0,
+    barsPerChord: t > 0.7 ? 1 : 2,
+    padVoice: null, currentChordFreqs: [chordRootFreq],
+    rng, mode, scale, progression, chordRootFreq, bassFreq, bpm, secondsPer16th, t, key,
+  };
+  nextNoteTime = ctx.currentTime + 0.05;
+  schedulerTimer = setInterval(schedulerTick, 25);
 }
 
 export const music = {
-  playTown() { ensureAudio(); startPad(0, 'town'); },
+  playTown() { ensureAudio(); startComposition(0, 1, 'town'); },
   playDungeon(depthIndex, isFinal = false) {
     ensureAudio();
     const t = isFinal ? 1.2 : Math.min(1, (depthIndex - 1) / 26);
-    startPad(t, isFinal ? 'final' : `d${depthIndex}`);
+    const seed = isFinal ? 999 : depthIndex * 97 + 11;
+    startComposition(t, seed, isFinal ? 'final' : `d${depthIndex}`);
   },
-  playCutscene() { ensureAudio(); startPad(0.45, 'cutscene'); },
-  playClassSelect() { ensureAudio(); startPad(0.15, 'classselect'); },
-  stop() { stopMusic(); music.setCombatIntensity(false); },
-  setCombatIntensity(active) {
-    if (active && !combatPulseTimer && ctx) {
-      const pulse = () => {
-        tone(58, { type: 'sine', peak: 0.13, attack: 0.01, decay: 0.15, release: 0.3, dest: musicGain });
-        combatPulseTimer = setTimeout(pulse, 950);
-      };
-      pulse();
-    } else if (!active && combatPulseTimer) {
-      clearTimeout(combatPulseTimer);
-      combatPulseTimer = null;
-    }
-  },
+  playCutscene() { ensureAudio(); startComposition(0.5, 5, 'cutscene'); },
+  playClassSelect() { ensureAudio(); startComposition(0.18, 3, 'classselect'); },
+  stop() { stopComposition(); combatIntensity = false; },
+  setCombatIntensity(active) { combatIntensity = active; },
 };
