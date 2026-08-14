@@ -1,4 +1,5 @@
 import { maxStats } from './player.js';
+import { MONSTER_ABILITY_INDEX } from './bestiary.js';
 
 export function enemyPower(depth, roomDepth, kind) {
   const level = depth * 2 + roomDepth;
@@ -26,13 +27,16 @@ export function enemyPower(depth, roomDepth, kind) {
 export function newCombatState() {
   return {
     cooldowns: {},
+    enemyCooldowns: {},
     playerEffects: [],
     enemyEffects: [],
     enemyTicks: [],
     playerTicks: [],
+    playerDotTicks: [],
     playerShield: 0,
     playerShieldTurns: 0,
     enemyStunTurns: 0,
+    playerStunTurns: 0,
   };
 }
 
@@ -68,6 +72,23 @@ export function enemyHit(playerStats, enemyStats) {
   let dmg = enemyStats.attack - mitigation * 0.55;
   dmg = Math.max(1, Math.round(dmg));
   return { dmg, dodged: false };
+}
+
+// Applies incoming damage to the player, absorbing through an active shield first.
+function applyDamageToPlayer(player, dmg, c) {
+  const log = [];
+  let remaining = dmg;
+  if (c.playerShield > 0) {
+    const absorbed = Math.min(c.playerShield, remaining);
+    c.playerShield -= absorbed;
+    remaining -= absorbed;
+    if (absorbed > 0) log.push({ type: 'shieldAbsorb', amt: absorbed });
+  }
+  if (remaining > 0) {
+    player.hp = Math.max(0, player.hp - remaining);
+    log.push({ type: 'enemy', dmg: remaining });
+  }
+  return log;
 }
 
 function resolveSpellCast(player, pStatsBase, pEff, enemy, spell, rank, c) {
@@ -144,10 +165,68 @@ function resolveSpellCast(player, pStatsBase, pEff, enemy, spell, rank, c) {
   return log;
 }
 
-function tickCooldowns(c) {
-  for (const id in c.cooldowns) {
-    if (c.cooldowns[id] > 0) c.cooldowns[id]--;
+function resolveMonsterAbility(player, pStatsBase, pEff, enemy, ability, c) {
+  const log = [];
+  const eEff = effectiveEnemyStats(enemy, c);
+
+  switch (ability.type) {
+    case 'damage': {
+      const dodged = Math.random() * 100 < pEff.dodge;
+      log.push({ type: 'abilityCast', ability });
+      if (dodged) { log.push({ type: 'dodge' }); break; }
+      const dmg = Math.max(1, Math.round(eEff.attack * ability.mult - pEff.defense * 0.4));
+      const dmgLog = applyDamageToPlayer(player, dmg, c);
+      for (const e of dmgLog) if (e.type === 'enemy') e.ability = ability;
+      log.push(...dmgLog);
+      if (ability.drainPct) {
+        const heal = Math.round(dmg * ability.drainPct);
+        enemy.hp = Math.min(enemy.maxHp, enemy.hp + heal);
+        log.push({ type: 'enemyHeal', heal, ability });
+      }
+      break;
+    }
+    case 'dot': {
+      c.playerDotTicks.push({ dmgPerTurn: Math.max(1, Math.round(eEff.attack * ability.mult)), turnsLeft: ability.turns, label: ability.name });
+      log.push({ type: 'abilityCast', ability });
+      log.push({ type: 'enemyDotApplied', ability });
+      break;
+    }
+    case 'debuffPlayer': {
+      const scaled = Math.round(ability.amount * (1 + enemy.level * 0.03));
+      c.playerEffects.push({ stat: ability.stat, amount: scaled, turnsLeft: ability.turns, label: ability.name });
+      log.push({ type: 'abilityCast', ability });
+      log.push({ type: 'enemyDebuffApplied', ability });
+      break;
+    }
+    case 'healSelf': {
+      const heal = Math.round(enemy.maxHp * ability.mult);
+      enemy.hp = Math.min(enemy.maxHp, enemy.hp + heal);
+      log.push({ type: 'abilityCast', ability });
+      log.push({ type: 'enemyHeal', heal, ability });
+      break;
+    }
+    case 'buffSelf': {
+      const base = ability.stat === 'defense' ? eEff.defense : eEff.attack;
+      const amount = Math.round(base * ability.mult);
+      c.enemyEffects.push({ stat: ability.stat, amount, turnsLeft: ability.turns || 3, label: ability.name });
+      log.push({ type: 'abilityCast', ability });
+      log.push({ type: 'enemyBuffApplied', ability });
+      break;
+    }
+    case 'stunPlayer': {
+      c.playerStunTurns = (c.playerStunTurns || 0) + (ability.stunTurns || 1);
+      log.push({ type: 'abilityCast', ability });
+      log.push({ type: 'playerStunApplied', ability });
+      break;
+    }
+    default: break;
   }
+  return log;
+}
+
+function tickCooldowns(c) {
+  for (const id in c.cooldowns) if (c.cooldowns[id] > 0) c.cooldowns[id]--;
+  for (const id in c.enemyCooldowns) if (c.enemyCooldowns[id] > 0) c.enemyCooldowns[id]--;
 }
 
 function tickDurations(c) {
@@ -155,14 +234,16 @@ function tickDurations(c) {
   c.enemyEffects = c.enemyEffects.map(e => ({ ...e, turnsLeft: e.turnsLeft - 1 })).filter(e => e.turnsLeft > 0);
   c.enemyTicks = c.enemyTicks.map(t => ({ ...t, turnsLeft: t.turnsLeft - 1 })).filter(t => t.turnsLeft > 0);
   c.playerTicks = (c.playerTicks || []).map(t => ({ ...t, turnsLeft: t.turnsLeft - 1 })).filter(t => t.turnsLeft > 0);
+  c.playerDotTicks = (c.playerDotTicks || []).map(t => ({ ...t, turnsLeft: t.turnsLeft - 1 })).filter(t => t.turnsLeft > 0);
   if (c.playerShieldTurns > 0) {
     c.playerShieldTurns--;
     if (c.playerShieldTurns <= 0) { c.playerShield = 0; c.playerShieldTurns = 0; }
   }
   if (c.enemyStunTurns > 0) c.enemyStunTurns--;
+  if (c.playerStunTurns > 0) c.playerStunTurns--;
 }
 
-// action = { kind: 'attack' } or { kind: 'spell', spell, rank }
+// action = { kind: 'attack' } | { kind: 'spell', spell, rank } | { kind: 'stunned' }
 export function resolveRound(player, enemy, c, action) {
   const log = [];
   const stats0 = maxStats(player);
@@ -180,6 +261,15 @@ export function resolveRound(player, enemy, c, action) {
     log.push({ type: 'enemyDefeated' });
     tickCooldowns(c); tickDurations(c);
     return { log, enemyDefeated: true, playerDefeated: false };
+  }
+  for (const tick of (c.playerDotTicks || [])) {
+    player.hp = Math.max(0, player.hp - tick.dmgPerTurn);
+    log.push({ type: 'enemyDotTick', dmg: tick.dmgPerTurn, label: tick.label });
+  }
+  if (player.hp <= 0) {
+    log.push({ type: 'playerDefeated' });
+    tickCooldowns(c); tickDurations(c);
+    return { log, enemyDefeated: false, playerDefeated: true };
   }
 
   const pStatsBase = maxStats(player);
@@ -199,6 +289,8 @@ export function resolveRound(player, enemy, c, action) {
     }
   } else if (action.kind === 'spell') {
     log.push(...resolveSpellCast(player, pStatsBase, pEff, enemy, action.spell, action.rank, c));
+  } else if (action.kind === 'stunned') {
+    log.push({ type: 'playerStunned' });
   }
 
   if (enemy.hp <= 0) {
@@ -210,21 +302,18 @@ export function resolveRound(player, enemy, c, action) {
   if (c.enemyStunTurns > 0) {
     log.push({ type: 'stunned' });
   } else {
-    const eHit = enemyHit(pEff, eEff);
-    if (eHit.dodged) {
-      log.push({ type: 'dodge' });
+    const usable = (enemy.abilities || [])
+      .map(id => MONSTER_ABILITY_INDEX[id])
+      .filter(a => a && (c.enemyCooldowns[a.id] || 0) <= 0);
+    const useAbility = usable.length > 0 && Math.random() < 0.5;
+    if (useAbility) {
+      const ability = usable[Math.floor(Math.random() * usable.length)];
+      c.enemyCooldowns[ability.id] = ability.cooldown;
+      log.push(...resolveMonsterAbility(player, pStatsBase, pEff, enemy, ability, c));
     } else {
-      let dmg = eHit.dmg;
-      if (c.playerShield > 0) {
-        const absorbed = Math.min(c.playerShield, dmg);
-        c.playerShield -= absorbed;
-        dmg -= absorbed;
-        if (absorbed > 0) log.push({ type: 'shieldAbsorb', amt: absorbed });
-      }
-      if (dmg > 0) {
-        player.hp = Math.max(0, player.hp - dmg);
-        log.push({ type: 'enemy', dmg });
-      }
+      const eHit = enemyHit(pEff, eEff);
+      if (eHit.dodged) log.push({ type: 'dodge' });
+      else log.push(...applyDamageToPlayer(player, eHit.dmg, c));
     }
   }
 

@@ -1,6 +1,18 @@
 import { DUNGEONS, FINAL_DUNGEON, dungeonHue } from './data.js';
 import { enemyPower } from './combat.js';
+import { generateMonsterName, rollEnemyTier, rollAbilities, rollUniqueMonster } from './bestiary.js';
 import { choice, randInt } from './utils.js';
+
+const TIER_MULT = { normal: 1, magic: 1.15, rare: 1.35, unique: 1.65 };
+
+function applyTierMult(stat, mult) {
+  stat.hp = Math.round(stat.hp * mult);
+  stat.maxHp = stat.hp;
+  stat.attack = Math.round(stat.attack * mult);
+  stat.defense = Math.round(stat.defense * mult);
+  stat.xp = Math.round(stat.xp * mult);
+  stat.gold = Math.round(stat.gold * mult);
+}
 
 function idx(size, x, y) { return y * size + x; }
 function inBounds(size, x, y) { return x >= 0 && y >= 0 && x < size && y < size; }
@@ -82,11 +94,30 @@ export function generateDungeon(depthIndex, isFinal = false) {
       const id2 = remaining.pop();
       const x = id2 % size, y = Math.floor(id2 / size);
       grid[idx(size, x, y)] = type;
-      if (type === 'enemy' || type === 'elite') {
+      if (type === 'elite') {
         const roomDepth = Math.max(1, dist[id2]);
-        const stat = enemyPower(depthIndex, roomDepth, type === 'elite' ? 'elite' : 'normal');
-        stat.name = (type === 'elite' ? 'Elite ' : '') + choice(theme.enemies);
-        stat.kind = type;
+        const stat = enemyPower(depthIndex, roomDepth, 'elite');
+        stat.kind = 'elite';
+        stat.tier = 'elite';
+        stat.name = 'Elite ' + generateMonsterName(theme.enemies);
+        stat.abilities = rollAbilities(1);
+        enemies[`${x},${y}`] = stat;
+      } else if (type === 'enemy') {
+        const roomDepth = Math.max(1, dist[id2]);
+        const tier = rollEnemyTier();
+        const stat = enemyPower(depthIndex, roomDepth, 'normal');
+        stat.kind = 'normal';
+        stat.tier = tier;
+        applyTierMult(stat, TIER_MULT[tier]);
+        if (tier === 'unique') {
+          const uniq = rollUniqueMonster();
+          stat.name = uniq.name;
+          stat.icon = uniq.icon;
+          stat.abilities = uniq.abilities;
+        } else {
+          stat.name = generateMonsterName(theme.enemies);
+          stat.abilities = tier === 'rare' ? rollAbilities(2) : tier === 'magic' ? rollAbilities(1) : [];
+        }
         enemies[`${x},${y}`] = stat;
       }
     }
@@ -101,6 +132,8 @@ export function generateDungeon(depthIndex, isFinal = false) {
   bossStat.name = theme.boss.name;
   bossStat.title = theme.boss.title;
   bossStat.kind = isFinal ? 'final' : 'boss';
+  bossStat.tier = bossStat.kind;
+  bossStat.abilities = rollAbilities(isFinal ? 3 : 2);
   enemies[`${bossPos.x},${bossPos.y}`] = bossStat;
 
   return {

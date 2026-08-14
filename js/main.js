@@ -15,7 +15,7 @@ import {
   barHTML, itemCardHTML, itemDetailHTML, paperdollHTML, tileGlyph,
   classCardHTML, classDetailHTML, spellButtonHTML, skillRowHTML, shopStockCardHTML,
 } from './ui.js';
-import { createVfxLayer, VFX_PRESETS, shakeEl, flashEl, spawnDamagePop } from './vfx.js';
+import { createVfxLayer, VFX_PRESETS, shakeEl, flashEl, spawnDamagePop, spawnProjectile, spawnMeleeSwipe, sleep } from './vfx.js';
 import { randInt, fmt } from './utils.js';
 
 const root = document.getElementById('app');
@@ -37,6 +37,7 @@ const G = {
   _toastTimer: null,
   classPreview: null,
   gamble: null,
+  dungeonGearOpen: false,
 };
 
 function persist() {
@@ -75,6 +76,7 @@ function enterDungeon(index, isFinal) {
   G.player.mana = maxStats(G.player).maxMana;
   G.screen = 'dungeon';
   G.selectedItemId = null;
+  G.dungeonGearOpen = false;
   persist();
   render();
 }
@@ -161,11 +163,18 @@ function performRound(action) {
     c.rewardLevels = levels;
 
     const kind = c.enemy.kind;
-    const dropChance = kind === 'normal' ? 0.55 : kind === 'elite' ? 0.9 : 1;
-    const minRarity = kind === 'boss' ? 2 : kind === 'final' ? 4 : kind === 'elite' ? 1 : 0;
-    const bonusTier = kind === 'boss' ? 0.6 : kind === 'final' ? 1.4 : kind === 'elite' ? 0.3 : 0;
+    const tier = c.enemy.tier || 'normal';
+    let dropChance, minRarity, bonusTier, forceRarityIndex = null;
+    if (kind === 'boss') { dropChance = 1; minRarity = 2; bonusTier = 0.6; }
+    else if (kind === 'final') { dropChance = 1; minRarity = 4; bonusTier = 1.4; }
+    else if (kind === 'elite') { dropChance = 0.9; minRarity = 1; bonusTier = 0.3; }
+    else if (tier === 'unique') { dropChance = 1; minRarity = 2; bonusTier = 1.3; if (Math.random() < 0.15) forceRarityIndex = Math.random() < 0.5 ? 4 : 5; }
+    else if (tier === 'rare') { dropChance = 0.95; minRarity = 1; bonusTier = 0.7; }
+    else if (tier === 'magic') { dropChance = 0.75; minRarity = 0; bonusTier = 0.35; }
+    else { dropChance = 0.55; minRarity = 0; bonusTier = 0; }
+
     if (Math.random() < dropChance) {
-      const item = generateItem(G.dungeon.depthIndex, { minRarityIndex: minRarity, bonusTier });
+      const item = generateItem(G.dungeon.depthIndex, { minRarityIndex: minRarity, bonusTier, forceRarityIndex });
       if (addItemToInventory(p, item)) {
         c.droppedItem = item;
       } else {
@@ -478,7 +487,8 @@ function renderSelectedDetail() {
     }
   }
   if (!item) return '';
-  return itemDetailHTML(item, { equipped });
+  const compareItem = equipped ? null : p.equipment[item.slot];
+  return itemDetailHTML(item, { equipped, compareItem });
 }
 
 function renderDungeonList() {
@@ -551,6 +561,13 @@ function renderShopTab() {
   </div>`;
 }
 
+function tierBadge(enemyObj) {
+  if (!enemyObj || enemyObj.kind !== 'normal') return '';
+  const tier = enemyObj.tier;
+  if (!tier || tier === 'normal') return '';
+  return ` tier-${tier}`;
+}
+
 function renderDungeon() {
   const d = G.dungeon;
   const p = G.player;
@@ -565,7 +582,13 @@ function renderDungeon() {
       let cls = 'tile';
       cls += revealed ? ` t-${type}` : ' hidden';
       if (isPlayer) cls += ' player-here';
-      gridHTML += `<div class="${cls}" data-action="tile-click" data-x="${x}" data-y="${y}">${revealed ? (isPlayer ? '🧍' : tileGlyph(type)) : ''}</div>`;
+      let glyph = revealed ? (isPlayer ? '🧍' : tileGlyph(type)) : '';
+      if (revealed && type === 'enemy') {
+        const enemyObj = d.enemies[key];
+        cls += tierBadge(enemyObj);
+        if (enemyObj?.tier === 'unique' && enemyObj.icon) glyph = enemyObj.icon;
+      }
+      gridHTML += `<div class="${cls}" data-action="tile-click" data-x="${x}" data-y="${y}">${glyph}</div>`;
     }
   }
   const lightX = ((d.playerPos.x + 0.5) / d.size) * 100;
@@ -579,6 +602,7 @@ function renderDungeon() {
       <div class="player-brief">
         ${barHTML('hp small', p.hp, stats.maxHp)}
         <span class="ppotion">🧪x${p.potions}</span>
+        <button class="btn btn-ghost" data-action="toggle-dungeon-gear" title="Gear">🎒</button>
       </div>
     </header>
     <div class="dungeon-wrap">
@@ -596,6 +620,7 @@ function renderDungeon() {
       </div>
     </div>
     ${G.toast ? `<div class="toast">${G.toast}</div>` : ''}
+    ${G.dungeonGearOpen ? renderDungeonGearOverlay() : ''}
   </div>`;
   const canvas = document.getElementById('dungeon-particles');
   if (canvas) {
@@ -605,7 +630,21 @@ function renderDungeon() {
   }
 }
 
+function renderDungeonGearOverlay() {
+  const p = G.player;
+  return `<div class="modal-overlay gear-overlay">
+    <div class="modal-box gear-box">
+      <div class="modal-title">Gear &amp; Inventory</div>
+      ${paperdollHTML(p.equipment)}
+      <div class="gear-inv">${p.inventory.length ? `<div class="inv-grid">${p.inventory.map(it => itemCardHTML(it, { selected: it.id === G.selectedItemId })).join('')}</div>` : '<div class="empty-note">No loot yet.</div>'}</div>
+      <div class="selected-detail">${renderSelectedDetail()}</div>
+      <div class="modal-actions"><button class="btn btn-primary" data-action="toggle-dungeon-gear">Close</button></div>
+    </div>
+  </div>`;
+}
+
 function enemyIcon(enemy) {
+  if (enemy.icon) return enemy.icon;
   switch (enemy.kind) {
     case 'boss': return '😈';
     case 'final': return '👺';
@@ -623,8 +662,17 @@ function effectChipsHTML(c, side) {
     if (c.enemyStunTurns > 0) chips.push(`<span class="chip chip-bad">Stunned (${c.enemyStunTurns})</span>`);
   } else {
     if (c.playerShield > 0) chips.push(`<span class="chip chip-good">🛡 Shield ${c.playerShield}</span>`);
+    for (const t of (c.playerDotTicks || [])) chips.push(`<span class="chip chip-bad">${t.label} (${t.turnsLeft})</span>`);
+    if (c.playerStunTurns > 0) chips.push(`<span class="chip chip-bad">Stunned (${c.playerStunTurns})</span>`);
   }
   return chips.join('');
+}
+
+function tierLabelHTML(enemy) {
+  if (enemy.kind !== 'normal' || !enemy.tier || enemy.tier === 'normal') return '';
+  const cls = enemy.tier;
+  const label = enemy.tier.charAt(0).toUpperCase() + enemy.tier.slice(1);
+  return `<span class="enemy-tier-badge tier-${cls}">${label}</span>`;
 }
 
 function renderCombat() {
@@ -634,19 +682,21 @@ function renderCombat() {
   const cls = getClass(p.classKey);
   const isBossy = c.enemy.kind === 'boss' || c.enemy.kind === 'final';
   const known = knownSpells(p);
+  const stunned = c.playerStunTurns > 0;
   root.innerHTML = `
   <div class="screen combat-screen ${isBossy ? 'boss-fight' : ''}" style="--hue:${G.dungeon?.hue ?? 0}">
     <canvas id="vfx-canvas" class="vfx-canvas"></canvas>
+    <div class="projectile-layer" id="projectile-layer"></div>
     <div class="combat-side enemy-side">
       <div class="portrait enemy-portrait" id="enemy-portrait">
         <div class="portrait-emoji">${enemyIcon(c.enemy)}</div>
         <div class="portrait-dmg-layer" id="enemy-dmg-layer"></div>
       </div>
-      <div class="enemy-name">${c.enemy.name}${c.enemy.title ? `<div class="enemy-title">${c.enemy.title}</div>` : ''}</div>
+      <div class="enemy-name">${tierLabelHTML(c.enemy)}${c.enemy.name}${c.enemy.title ? `<div class="enemy-title">${c.enemy.title}</div>` : ''}</div>
       ${barHTML('enemy-hp', c.enemy.hp, c.enemy.maxHp, `${fmt(c.enemy.hp)} / ${fmt(c.enemy.maxHp)}`)}
       <div class="effect-chips">${effectChipsHTML(c, 'enemy')}</div>
     </div>
-    <div class="combat-log" id="combat-log">${c.log.slice(-8).map(renderLogLine).join('')}</div>
+    <div class="combat-log" id="combat-log">${c.log.slice(-10).map(renderLogLine).join('')}</div>
     <div class="combat-side player-side">
       <div class="portrait player-portrait" id="player-portrait">
         <div class="portrait-emoji">${cls.icon}</div>
@@ -656,7 +706,9 @@ function renderCombat() {
       ${barHTML('mana', p.mana, stats.maxMana, `MP ${fmt(p.mana)} / ${fmt(stats.maxMana)}`)}
       <div class="effect-chips">${effectChipsHTML(c, 'player')}</div>
     </div>
-    ${c.result ? renderCombatResult(c) : `
+    ${c.result ? renderCombatResult(c) : stunned ? `
+      <div class="stunned-banner">😵 You are stunned and cannot act!</div>
+      <div class="combat-actions"><button class="btn btn-primary" data-action="combat-stunned-continue">Continue</button></div>` : `
       ${known.length ? `<div class="spell-bar">${known.map(s => spellButtonHTML(s, p.spellRanks[s.id] || 0, c.cooldowns[s.id] || 0, p.mana)).join('')}</div>` : ''}
       <div class="combat-actions">
         <button class="btn btn-primary" data-action="combat-attack">⚔ Attack</button>
@@ -669,62 +721,105 @@ function renderCombat() {
   if (logEl) logEl.scrollTop = logEl.scrollHeight;
 
   const canvas = document.getElementById('vfx-canvas');
+  const projLayer = document.getElementById('projectile-layer');
   if (canvas) {
     const vfx = createVfxLayer(canvas);
     if (c.lastRoundLog) {
-      runCombatVfx(vfx, c.lastRoundLog);
+      runCombatVfx(vfx, projLayer, c.lastRoundLog);
       c.lastRoundLog = null;
     }
   }
 }
 
-function runCombatVfx(vfx, entries) {
+async function runCombatVfx(vfx, projLayer, entries) {
   const enemyPortrait = document.getElementById('enemy-portrait');
   const playerPortrait = document.getElementById('player-portrait');
   const enemyDmgLayer = document.getElementById('enemy-dmg-layer');
   const playerDmgLayer = document.getElementById('player-dmg-layer');
   const screenEl = document.querySelector('.combat-screen');
+
+  async function impactOnEnemy(spell, burstShape) {
+    const preset = VFX_PRESETS[spell.vfx] || VFX_PRESETS['attack-white'];
+    if (spell.proj) await spawnProjectile(projLayer, spell.proj, PLAYER_POS, ENEMY_POS);
+    else if (spell.melee) await spawnMeleeSwipe(projLayer, spell.icon, ENEMY_POS);
+    vfx.burst(ENEMY_POS[0], ENEMY_POS[1], burstShape ? { ...preset, shape: burstShape } : preset);
+  }
+
   for (const e of entries) {
     switch (e.type) {
       case 'player':
+        await spawnMeleeSwipe(projLayer, '⚔️', ENEMY_POS);
         vfx.burst(ENEMY_POS[0], ENEMY_POS[1], VFX_PRESETS['attack-white']);
         shakeEl(enemyPortrait, 'sm'); flashEl(enemyPortrait, 'flash-hit');
         spawnDamagePop(enemyDmgLayer, e.crit ? `${e.dmg}!` : `${e.dmg}`, e.crit ? 'crit' : 'normal');
         break;
       case 'spellDamage': {
-        const preset = VFX_PRESETS[e.spell.vfx] || VFX_PRESETS['attack-white'];
-        vfx.burst(ENEMY_POS[0], ENEMY_POS[1], preset);
+        await impactOnEnemy(e.spell);
         shakeEl(enemyPortrait, e.crit ? 'lg' : 'md'); flashEl(enemyPortrait, 'flash-hit');
         spawnDamagePop(enemyDmgLayer, e.crit ? `${e.dmg}!` : `${e.dmg}`, e.crit ? 'crit' : 'spell');
         break;
       }
       case 'dotTick':
-        vfx.burst(ENEMY_POS[0], ENEMY_POS[1], VFX_PRESETS['poison-purple']);
+        vfx.burst(ENEMY_POS[0], ENEMY_POS[1], { ...(VFX_PRESETS['poison-purple']), shape: 'cloud' });
         spawnDamagePop(enemyDmgLayer, `${e.dmg}`, 'dot');
         break;
-      case 'enemy':
-        vfx.burst(PLAYER_POS[0], PLAYER_POS[1], VFX_PRESETS['enemy-hit-red']);
+      case 'enemy': {
+        const preset = e.ability ? (VFX_PRESETS[e.ability.vfx] || VFX_PRESETS['enemy-hit-red']) : VFX_PRESETS['enemy-hit-red'];
+        vfx.burst(PLAYER_POS[0], PLAYER_POS[1], preset);
         shakeEl(playerPortrait, 'sm'); flashEl(playerPortrait, 'flash-hit');
         spawnDamagePop(playerDmgLayer, `${e.dmg}`, 'damage');
+        break;
+      }
+      case 'enemyDotTick':
+        vfx.burst(PLAYER_POS[0], PLAYER_POS[1], { colors: ['#8dff5c', '#3f8a1e'], shape: 'cloud', count: 12, speed: 2 });
+        spawnDamagePop(playerDmgLayer, `${e.dmg}`, 'dot');
         break;
       case 'lifesteal':
       case 'hotTick':
       case 'spellHeal':
-        vfx.burst(PLAYER_POS[0], PLAYER_POS[1], VFX_PRESETS['heal-green']);
+        if (e.spell?.reverseProj) await spawnProjectile(projLayer, e.spell.reverseProj, ENEMY_POS, PLAYER_POS);
+        vfx.burst(PLAYER_POS[0], PLAYER_POS[1], { ...(VFX_PRESETS[e.spell?.vfx || 'heal-green']), shape: 'rise' });
         spawnDamagePop(playerDmgLayer, `+${e.heal}`, 'heal');
         break;
       case 'potion':
-        vfx.burst(PLAYER_POS[0], PLAYER_POS[1], VFX_PRESETS['heal-green']);
+        vfx.burst(PLAYER_POS[0], PLAYER_POS[1], { ...(VFX_PRESETS['heal-green']), shape: 'rise' });
         if (e.heal) spawnDamagePop(playerDmgLayer, `+${e.heal}`, 'heal');
         break;
       case 'buffApplied':
       case 'shieldApplied':
-        vfx.burst(PLAYER_POS[0], PLAYER_POS[1], VFX_PRESETS[e.spell.vfx] || VFX_PRESETS.sparkle);
+        vfx.burst(PLAYER_POS[0], PLAYER_POS[1], { ...(VFX_PRESETS[e.spell.vfx] || VFX_PRESETS.sparkle), shape: 'rise' });
+        flashEl(playerPortrait, 'flash-buff');
         break;
       case 'debuffApplied':
       case 'dotApplied':
       case 'stunApplied':
-        vfx.burst(ENEMY_POS[0], ENEMY_POS[1], VFX_PRESETS[e.spell.vfx] || VFX_PRESETS.hex);
+        if (e.spell.proj) await spawnProjectile(projLayer, e.spell.proj, PLAYER_POS, ENEMY_POS);
+        vfx.smite(ENEMY_POS[0], ENEMY_POS[1], VFX_PRESETS[e.spell.vfx] || VFX_PRESETS.hex);
+        flashEl(enemyPortrait, 'flash-hit');
+        break;
+      case 'abilityCast':
+        break;
+      case 'enemyDotApplied':
+        vfx.burst(PLAYER_POS[0], PLAYER_POS[1], { ...(VFX_PRESETS[e.ability.vfx] || VFX_PRESETS.hex), shape: 'cloud' });
+        break;
+      case 'enemyDebuffApplied':
+        vfx.smite(PLAYER_POS[0], PLAYER_POS[1], VFX_PRESETS[e.ability.vfx] || VFX_PRESETS.hex);
+        flashEl(playerPortrait, 'flash-hit');
+        break;
+      case 'enemyHeal':
+        vfx.burst(ENEMY_POS[0], ENEMY_POS[1], { ...(VFX_PRESETS[(e.ability && e.ability.vfx) || 'poison-purple']), shape: 'rise' });
+        spawnDamagePop(enemyDmgLayer, `+${e.heal}`, 'heal');
+        break;
+      case 'enemyBuffApplied':
+        vfx.burst(ENEMY_POS[0], ENEMY_POS[1], { ...(VFX_PRESETS[e.ability.vfx] || VFX_PRESETS.roar), shape: 'rise' });
+        break;
+      case 'playerStunApplied':
+        vfx.smite(PLAYER_POS[0], PLAYER_POS[1], VFX_PRESETS.impact);
+        shakeEl(screenEl, 'md');
+        break;
+      case 'playerStunned':
+        shakeEl(playerPortrait, 'sm');
+        spawnDamagePop(playerDmgLayer, 'Stunned!', 'dodge');
         break;
       case 'shieldAbsorb':
         spawnDamagePop(playerDmgLayer, `🛡${e.amt}`, 'shield');
@@ -738,6 +833,7 @@ function runCombatVfx(vfx, entries) {
         break;
       default: break;
     }
+    await sleep(70);
   }
 }
 
@@ -757,27 +853,42 @@ function renderCombatResult(c) {
   </div>`;
 }
 
+function num(n) { return `<span class="log-num">${n}</span>`; }
+function ent(name) { return `<span class="log-entity">${name}</span>`; }
+function crit() { return `<span class="log-crit">CRITICAL!</span>`; }
+
 function renderLogLine(entry) {
+  const enemyName = G.combat ? G.combat.enemy.name : 'the enemy';
   switch (entry.type) {
-    case 'player': return `<div class="log-line log-player">${entry.crit ? '💥 Critical! ' : ''}You hit for ${entry.dmg}.</div>`;
-    case 'spellDamage': return `<div class="log-line log-player">${entry.spell.icon} ${entry.spell.name}${entry.crit ? ' — Critical!' : ''} for ${entry.dmg}.</div>`;
-    case 'dotTick': return `<div class="log-line log-dot">${entry.label} burns for ${entry.dmg}.</div>`;
-    case 'hotTick': return `<div class="log-line log-heal">${entry.label} restores ${entry.heal} HP.</div>`;
-    case 'buffApplied': return `<div class="log-line log-buff">${entry.spell.icon} ${entry.spell.name} takes hold!</div>`;
-    case 'debuffApplied': return `<div class="log-line log-debuff">${entry.spell.icon} ${entry.spell.name} weakens the enemy!</div>`;
-    case 'dotApplied': return `<div class="log-line log-debuff">${entry.spell.icon} ${entry.spell.name} begins to fester.</div>`;
-    case 'shieldApplied': return `<div class="log-line log-buff">${entry.spell.icon} ${entry.spell.name} shields you for ${entry.amt}.</div>`;
-    case 'shieldAbsorb': return `<div class="log-line log-buff">Your shield absorbs ${entry.amt} damage.</div>`;
-    case 'stunApplied': return `<div class="log-line log-debuff">${entry.spell.icon} ${entry.spell.name} staggers the enemy!</div>`;
-    case 'stunned': return `<div class="log-line log-dodge">The enemy is stunned and cannot act!</div>`;
+    case 'player': return `<div class="log-line log-player">${entry.crit ? crit() + ' ' : ''}You strike for ${num(entry.dmg)}.</div>`;
+    case 'spellDamage': return `<div class="log-line log-player">${entry.spell.icon} ${ent(entry.spell.name)}${entry.crit ? ' ' + crit() : ''} hits for ${num(entry.dmg)}.</div>`;
+    case 'dotTick': return `<div class="log-line log-dot">${ent(entry.label)} burns for ${num(entry.dmg)}.</div>`;
+    case 'enemyDotTick': return `<div class="log-line log-debuff">${ent(entry.label)} gnaws at you for ${num(entry.dmg)}.</div>`;
+    case 'hotTick': return `<div class="log-line log-heal">${ent(entry.label)} restores ${num('+' + entry.heal)} HP.</div>`;
+    case 'buffApplied': return `<div class="log-line log-buff">${entry.spell.icon} ${ent(entry.spell.name)} takes hold!</div>`;
+    case 'debuffApplied': return `<div class="log-line log-debuff">${entry.spell.icon} ${ent(entry.spell.name)} smites the enemy!</div>`;
+    case 'dotApplied': return `<div class="log-line log-debuff">${entry.spell.icon} ${ent(entry.spell.name)} begins to fester.</div>`;
+    case 'shieldApplied': return `<div class="log-line log-buff">${entry.spell.icon} ${ent(entry.spell.name)} shields you for ${num(entry.amt)}.</div>`;
+    case 'shieldAbsorb': return `<div class="log-line log-buff">Your shield absorbs ${num(entry.amt)} damage.</div>`;
+    case 'stunApplied': return `<div class="log-line log-debuff">${entry.spell.icon} ${ent(entry.spell.name)} staggers the enemy!</div>`;
+    case 'stunned': return `<div class="log-line log-dodge">${ent(enemyName)} is stunned and cannot act!</div>`;
     case 'cleanse': return `<div class="log-line log-heal">Your mind clears of all hexes.</div>`;
-    case 'spellHeal': return `<div class="log-line log-heal">${entry.spell.icon} ${entry.spell.name} restores ${entry.heal} HP.</div>`;
-    case 'enemy': return `<div class="log-line log-enemy">Enemy hits you for ${entry.dmg}.</div>`;
+    case 'spellHeal': return `<div class="log-line log-heal">${entry.spell.icon} ${ent(entry.spell.name)} restores ${num('+' + entry.heal)} HP.</div>`;
+    case 'enemy': return entry.ability
+      ? `<div class="log-line log-enemy">${entry.ability.icon} ${ent(entry.ability.name)} hits you for ${num(entry.dmg)}.</div>`
+      : `<div class="log-line log-enemy">${ent(enemyName)} hits you for ${num(entry.dmg)}.</div>`;
     case 'dodge': return `<div class="log-line log-dodge">You dodge the attack!</div>`;
-    case 'lifesteal': return `<div class="log-line log-heal">Lifesteal +${entry.heal} HP.</div>`;
-    case 'potion': return `<div class="log-line log-heal">You drink a potion (+${entry.heal} HP).</div>`;
-    case 'enemyDefeated': return `<div class="log-line log-win">Enemy defeated!</div>`;
-    case 'playerDefeated': return `<div class="log-line log-lose">You have fallen...</div>`;
+    case 'lifesteal': return `<div class="log-line log-heal">Lifesteal ${num('+' + entry.heal)} HP.</div>`;
+    case 'potion': return `<div class="log-line log-heal">You drink a potion (${num('+' + entry.heal)} HP).</div>`;
+    case 'abilityCast': return `<div class="log-line log-ability">${entry.ability.icon} ${ent(enemyName)} uses ${ent(entry.ability.name)}!</div>`;
+    case 'enemyDotApplied': return `<div class="log-line log-debuff">${entry.ability.icon} ${ent(entry.ability.name)} coils around you!</div>`;
+    case 'enemyDebuffApplied': return `<div class="log-line log-debuff">${entry.ability.icon} ${ent(entry.ability.name)} weakens you!</div>`;
+    case 'enemyHeal': return `<div class="log-line log-heal">${entry.ability ? entry.ability.icon + ' ' + ent(entry.ability.name) : ent(enemyName)} recovers ${num('+' + entry.heal)} HP.</div>`;
+    case 'enemyBuffApplied': return `<div class="log-line log-debuff">${entry.ability.icon} ${ent(entry.ability.name)} empowers ${ent(enemyName)}!</div>`;
+    case 'playerStunApplied': return `<div class="log-line log-debuff">${entry.ability.icon} ${ent(entry.ability.name)} leaves you reeling!</div>`;
+    case 'playerStunned': return `<div class="log-line log-dodge">You are stunned and cannot act!</div>`;
+    case 'enemyDefeated': return `<div class="log-line log-win">⚔️ ${ent(enemyName)} is defeated!</div>`;
+    case 'playerDefeated': return `<div class="log-line log-lose">💀 You have fallen...</div>`;
     default: return '';
   }
 }
@@ -915,6 +1026,7 @@ const actions = {
       [{ label: 'Stay', action: 'cancel' }, { label: 'Retreat', action: 'confirm', primary: true }],
       (act) => { if (act === 'confirm') { stopDungeonParticles(); G.dungeon = null; goTown(); } });
   },
+  'toggle-dungeon-gear': () => { G.dungeonGearOpen = !G.dungeonGearOpen; G.selectedItemId = null; render(); },
   'move': (btn) => attemptMove(parseInt(btn.dataset.dx, 10), parseInt(btn.dataset.dy, 10)),
   'tile-click': (btn) => {
     const x = parseInt(btn.dataset.x, 10), y = parseInt(btn.dataset.y, 10);
@@ -936,6 +1048,7 @@ const actions = {
     }
     render();
   },
+  'combat-stunned-continue': () => performRound({ kind: 'stunned' }),
   'combat-auto': () => toggleAuto(),
   'combat-flee': () => { stopAuto(); G.combat = null; G.screen = 'dungeon'; render(); },
   'combat-continue': () => finishCombat(),
@@ -958,7 +1071,7 @@ document.addEventListener('click', (e) => {
 });
 
 window.addEventListener('keydown', (e) => {
-  if (G.screen === 'dungeon') {
+  if (G.screen === 'dungeon' && !G.dungeonGearOpen) {
     const map = { ArrowUp: [0, -1], ArrowDown: [0, 1], ArrowLeft: [-1, 0], ArrowRight: [1, 0], w: [0, -1], s: [0, 1], a: [-1, 0], d: [1, 0] };
     const v = map[e.key];
     if (v) { e.preventDefault(); attemptMove(v[0], v[1]); }

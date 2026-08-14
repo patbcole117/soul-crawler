@@ -1,4 +1,4 @@
-import { SLOT_ORDER, SLOT_LABEL, SLOT_ICON } from './data.js';
+import { SLOT_ORDER, SLOT_LABEL, SLOT_ICON, STAT_LABEL, STAT_SUFFIX } from './data.js';
 import { describeStats, rarityOf, buyPrice } from './items.js';
 import { spellsForClass, spellEffectLabel, MAX_RANK } from './spells.js';
 import { fmt } from './utils.js';
@@ -20,9 +20,32 @@ export function itemCardHTML(item, { equipped = false, selected = false } = {}) 
   </div>`;
 }
 
-export function itemDetailHTML(item, { canEquip = true, equipped = false } = {}) {
+function statDeltaRows(item, compareItem) {
+  const keys = new Set([...Object.keys(item.stats), ...(compareItem ? Object.keys(compareItem.stats) : [])]);
+  return [...keys].map(key => {
+    const val = item.stats[key] || 0;
+    const cmpVal = compareItem ? (compareItem.stats[key] || 0) : 0;
+    const delta = val - cmpVal;
+    const label = STAT_LABEL[key] || key;
+    const suffix = STAT_SUFFIX[key] || '';
+    const sign = val >= 0 ? '+' : '';
+    let deltaHTML = '';
+    if (compareItem) {
+      if (delta > 0) deltaHTML = `<span class="stat-delta up">▲${delta}${suffix}</span>`;
+      else if (delta < 0) deltaHTML = `<span class="stat-delta down">▼${Math.abs(delta)}${suffix}</span>`;
+      else deltaHTML = `<span class="stat-delta same">–</span>`;
+    }
+    return `<div class="stat-row"><span>${sign}${val}${suffix} ${label}</span>${deltaHTML}</div>`;
+  }).join('');
+}
+
+export function itemDetailHTML(item, { canEquip = true, equipped = false, compareItem = null } = {}) {
   const rarity = rarityOf(item);
-  const stats = describeStats(item.stats);
+  const showCompare = !equipped && compareItem && compareItem.id !== item.id;
+  const statsHTML = showCompare
+    ? `<div class="item-detail-stats compare">${statDeltaRows(item, compareItem)}</div>
+       <div class="compare-note">vs. equipped: <span style="color:${rarityOf(compareItem).color}">${compareItem.name}</span></div>`
+    : `<div class="item-detail-stats">${describeStats(item.stats).map(s => `<div>${s}</div>`).join('')}</div>`;
   return `<div class="item-detail" style="--rc:${rarity.color}">
     <div class="item-detail-head">
       <span class="item-detail-icon">${SLOT_ICON[item.slot]}</span>
@@ -31,7 +54,7 @@ export function itemDetailHTML(item, { canEquip = true, equipped = false } = {})
         <div class="item-detail-meta">${rarity.name} ${SLOT_LABEL[item.slot]} &middot; ilvl ${item.ilvl}</div>
       </div>
     </div>
-    <div class="item-detail-stats">${stats.map(s => `<div>${s}</div>`).join('')}</div>
+    ${statsHTML}
     <div class="item-detail-actions">
       ${equipped
         ? `<button class="btn" data-action="unequip" data-slot="${item.slot}">Unequip</button>`
