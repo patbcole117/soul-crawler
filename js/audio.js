@@ -228,8 +228,9 @@ function modeForT(t) {
   return 'dark';
 }
 
+// Seventh chords (root/3rd/5th/7th) rather than plain triads, for richer harmony.
 function degreeToChordSemis(scale, degree) {
-  return [degree, degree + 2, degree + 4].map((i) => {
+  return [degree, degree + 2, degree + 4, degree + 6].map((i) => {
     const oct = Math.floor(i / 7);
     return scale[((i % 7) + 7) % 7] + oct * 12;
   });
@@ -286,6 +287,16 @@ function hatAt(time, peak) {
   noiseBurstAt(time, { duration: 0.045, peak, filterFreq: 7500, filterType: 'highpass', dest: musicBus });
 }
 
+// A sudden dissonant cluster stab (minor 2nd + tritone) — the classic unpredictable
+// horror-strings jump-scare, used sparingly by spooky/boss themes.
+function stingerHit(time, ferocity) {
+  const base = 190 + Math.random() * 170;
+  [0, 1, 6].forEach((iv) => {
+    toneAt(base * Math.pow(2, iv / 12), time, { type: 'sawtooth', peak: 0.2 + ferocity * 0.14, attack: 0.002, decay: 0.05, sustain: 0.15, release: 0.55, dest: musicBus });
+  });
+  noiseBurstAt(time, { duration: 0.25, peak: 0.14 + ferocity * 0.08, filterFreq: 2600, filterType: 'bandpass', dest: musicBus });
+}
+
 // ---------- scheduler ----------
 
 let schedulerTimer = null;
@@ -295,6 +306,7 @@ let currentKey = null;
 let combatIntensity = false;
 
 const ARP_PATTERN = [0, 1, 2, 1, 0, 2, 1, 3];
+const COUNTER_PATTERN = [3, 2, 0, 1, 3, 0, 2, 1];
 
 function changeChord(state, time) {
   state.chordIdx = (state.chordIdx + 1) % state.progression.length;
@@ -302,7 +314,7 @@ function changeChord(state, time) {
   const semis = degreeToChordSemis(state.scale, degree);
   const freqs = semis.map((s) => state.chordRootFreq * Math.pow(2, s / 12));
   state.currentChordFreqs = freqs;
-  const padFreqs = [freqs[0] / 2, freqs[0], freqs[1], freqs[2], freqs[0] * 2];
+  const padFreqs = [freqs[0] / 2, freqs[0], freqs[1], freqs[2], freqs[3], freqs[0] * 2];
   const filterFreq = 900 - state.t * 350;
   const newPad = createPadVoice(padFreqs, filterFreq);
   newPad.fadeIn(1.6, 0.24 + state.t * 0.06);
@@ -328,6 +340,7 @@ function scheduleStep(state, step, time) {
   const hatProb = 0.42 + state.t * 0.3 + intensity;
   if (posInBar % 2 === 0 && rng() < hatProb) hatAt(time, 0.045 + state.t * 0.025);
 
+  // Lead: a simple up/down arpeggio contour through the current (now four-note) chord.
   if (posInBar % 2 === 0) {
     const density = 0.32 + state.t * 0.42 + intensity;
     if (rng() < density) {
@@ -341,13 +354,75 @@ function scheduleStep(state, step, time) {
       toneAt(freq, time, { type: state.t > 0.6 ? 'sawtooth' : 'triangle', peak: 0.1, attack: 0.004, decay: 0.12, release: 0.32, dest: leadBus });
     }
   }
+
+  // Countermelody: a softer answering voice a register down, offset from the lead's
+  // rhythm and walking the chord in the opposite direction — simple two-part interplay.
+  if (posInBar % 4 === 2) {
+    const density = 0.28 + state.t * 0.3;
+    if (rng() < density) {
+      state.counterStep = (state.counterStep || 0) + 1;
+      const idx = COUNTER_PATTERN[state.counterStep % COUNTER_PATTERN.length] % chord.length;
+      const freq = chord[idx] * 0.5;
+      toneAt(freq, time, { type: 'sine', peak: 0.075, attack: 0.012, decay: 0.16, sustain: 0.1, release: 0.42, dest: musicBus });
+    }
+  }
+
+  if (state.spooky && rng() < 0.01 + state.t * 0.006) stingerHit(time, 0.3 + state.t * 0.2);
+}
+
+function changeBossChord(state, time) {
+  state.chordIdx = (state.chordIdx + 1) % state.progression.length;
+  const degree = state.progression[state.chordIdx];
+  const semis = degreeToChordSemis(state.scale, degree);
+  const freqs = semis.map((s) => state.chordRootFreq * Math.pow(2, s / 12));
+  state.currentChordFreqs = freqs;
+  const clusterSemis = [0, 1, 6];
+  const padFreqs = clusterSemis.map((s) => (state.chordRootFreq * 0.5) * Math.pow(2, s / 12)).concat(freqs);
+  const filterFreq = 480 + state.ferocity * 280;
+  const newPad = createPadVoice(padFreqs, filterFreq);
+  newPad.fadeIn(0.45, 0.2 + state.ferocity * 0.08);
+  if (state.padVoice) state.padVoice.fadeOut(0.45);
+  state.padVoice = newPad;
+}
+
+// Boss/final-boss theme: relentless dark-mode ostinato, heavy kick, dissonant stabs,
+// and unpredictable horror stingers. Ferocity (0-1) pushes tempo, weight, and density.
+function scheduleBossStep(state, step, time) {
+  const posInBar = step % 16;
+  const stepsPerChord = state.barsPerChord * 16;
+  if (step % stepsPerChord === 0) changeBossChord(state, time);
+  const chord = state.currentChordFreqs;
+  const rng = state.rng;
+  const f = state.ferocity;
+
+  if (posInBar % 2 === 0) {
+    toneAt(state.bassFreq, time, { type: 'sawtooth', peak: 0.24 + f * 0.14, attack: 0.004, decay: 0.1, release: 0.16, dest: musicBus });
+  }
+  if (posInBar % 4 === 0) {
+    kickAt(time, 0.32 + f * 0.2);
+    if (f > 0.55 && rng() < 0.4) kickAt(time + state.secondsPer16th * 0.5, 0.2);
+  }
+  if (rng() < 0.5 + f * 0.3) hatAt(time, 0.05 + f * 0.03);
+  if ((posInBar === 6 || posInBar === 14) && rng() < 0.5 + f * 0.3) {
+    chord.forEach((freq) => toneAt(freq, time, { type: 'sawtooth', peak: 0.09, attack: 0.003, decay: 0.1, release: 0.25, dest: musicBus }));
+  }
+  if (rng() < 0.55 + f * 0.25) {
+    state.arpStep = (state.arpStep || 0) + 1;
+    const idx = ARP_PATTERN[state.arpStep % ARP_PATTERN.length] % chord.length;
+    let freq = chord[idx];
+    if (rng() < 0.5) freq *= 2;
+    if (rng() < 0.3) freq *= Math.pow(2, 1 / 12);
+    toneAt(freq, time, { type: 'sawtooth', peak: 0.09, attack: 0.003, decay: 0.08, release: 0.22, dest: leadBus });
+  }
+  if (rng() < 0.012 + f * 0.012) stingerHit(time, f);
 }
 
 function schedulerTick() {
   const state = compositionState;
   if (!state || !ctx) return;
+  const stepFn = state.engine === 'boss' ? scheduleBossStep : scheduleStep;
   while (nextNoteTime < ctx.currentTime + 0.12) {
-    scheduleStep(state, state.step, nextNoteTime);
+    stepFn(state, state.step, nextNoteTime);
     nextNoteTime += state.secondsPer16th;
     state.step++;
   }
@@ -360,13 +435,13 @@ function stopComposition() {
   currentKey = null;
 }
 
-function startComposition(t, seed, key) {
+function startComposition(t, seed, key, opts = {}) {
   if (!ctx || currentKey === key) return;
   stopComposition();
   currentKey = key;
 
   const rng = mulberry32(seed >>> 0);
-  const mode = modeForT(t);
+  const mode = opts.forceMode || modeForT(t);
   const scale = SCALES[mode];
   const progVariants = PROGRESSIONS[mode];
   const progression = progVariants[Math.floor(rng() * progVariants.length)];
@@ -381,13 +456,44 @@ function startComposition(t, seed, key) {
   if (leadDelay) leadDelay.delayTime.setTargetAtTime((60 / bpm) * 0.75, ctx.currentTime, 0.1);
 
   compositionState = {
-    step: 0, chordIdx: -1, arpStep: 0,
+    step: 0, chordIdx: -1, arpStep: 0, counterStep: 0,
     barsPerChord: t > 0.7 ? 1 : 2,
     padVoice: null, currentChordFreqs: [chordRootFreq],
     rng, mode, scale, progression, chordRootFreq, bassFreq, bpm, secondsPer16th, t, key,
+    engine: 'ambient', spooky: !!opts.spooky,
   };
   nextNoteTime = ctx.currentTime + 0.05;
   schedulerTimer = setInterval(schedulerTick, 25);
+}
+
+function startBossComposition(seed, key, ferocity) {
+  if (!ctx || currentKey === key) return;
+  stopComposition();
+  currentKey = key;
+
+  const rng = mulberry32(seed >>> 0);
+  const scale = SCALES.dark;
+  const progVariants = PROGRESSIONS.dark;
+  const progression = progVariants[Math.floor(rng() * progVariants.length)];
+  const transpose = Math.floor(rng() * 3);
+
+  const bassMidi = 28 - Math.round(ferocity * 4) + transpose;
+  const bassFreq = 440 * Math.pow(2, (bassMidi - 69) / 12);
+  const chordRootFreq = bassFreq * 4;
+  const bpm = 80 + ferocity * 42;
+  const secondsPer16th = (60 / bpm) / 4;
+
+  if (leadDelay) leadDelay.delayTime.setTargetAtTime((60 / bpm) * 0.5, ctx.currentTime, 0.08);
+
+  compositionState = {
+    step: 0, chordIdx: -1, arpStep: 0,
+    barsPerChord: ferocity > 0.6 ? 0.5 : 1,
+    padVoice: null, currentChordFreqs: [chordRootFreq],
+    rng, scale, progression, chordRootFreq, bassFreq, bpm, secondsPer16th,
+    t: 1, ferocity, engine: 'boss', key,
+  };
+  nextNoteTime = ctx.currentTime + 0.05;
+  schedulerTimer = setInterval(schedulerTick, 20);
 }
 
 export const music = {
@@ -400,6 +506,17 @@ export const music = {
   },
   playCutscene() { ensureAudio(); startComposition(0.5, 5, 'cutscene'); },
   playClassSelect() { ensureAudio(); startComposition(0.18, 3, 'classselect'); },
+  playBossTheme(depthIndex, isFinal = false) {
+    ensureAudio();
+    const ferocity = isFinal ? 1 : Math.min(1, 0.35 + (depthIndex / 27) * 0.65);
+    const seed = isFinal ? 4242 : depthIndex * 613 + 29;
+    startBossComposition(seed, isFinal ? 'boss-final' : `boss-${depthIndex}`, ferocity);
+  },
+  playUniqueTheme(depthIndex) {
+    ensureAudio();
+    const t = Math.max(0.55, Math.min(1, (depthIndex - 1) / 26));
+    startComposition(t, depthIndex * 311 + 41, `unique-${depthIndex}`, { spooky: true });
+  },
   stop() { stopComposition(); combatIntensity = false; },
   setCombatIntensity(active) { combatIntensity = active; },
 };

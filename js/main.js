@@ -150,7 +150,11 @@ function startCombat(enemy, pos) {
     result: null, locked: false, vfx: null, ...newCombatState(),
   };
   G.screen = 'combat';
-  music.setCombatIntensity(true);
+  const depth = G.dungeon?.depthIndex || 1;
+  if (enemy.kind === 'final') music.playBossTheme(depth, true);
+  else if (enemy.kind === 'boss') music.playBossTheme(depth, false);
+  else if (enemy.tier === 'unique') music.playUniqueTheme(depth);
+  else music.setCombatIntensity(true);
   render();
 }
 
@@ -273,12 +277,14 @@ function finishCombat() {
     if (kind === 'boss') { handleDungeonCleared(d.depthIndex); return; }
     if (kind === 'final') { handleFinalCleared(); return; }
     G.screen = 'dungeon';
+    music.playDungeon(d.depthIndex, d.isFinal);
     render();
   } else {
     G.combat = null;
     stopDungeonParticles();
     G.dungeon = null;
     G.screen = 'town';
+    music.playTown();
     persist();
     render();
   }
@@ -1153,7 +1159,14 @@ const actions = {
   },
   'combat-stunned-continue': () => performRound({ kind: 'stunned' }),
   'combat-auto': () => toggleAuto(),
-  'combat-flee': () => { stopAuto(); music.setCombatIntensity(false); G.combat = null; G.screen = 'dungeon'; render(); },
+  'combat-flee': () => {
+    stopAuto();
+    music.setCombatIntensity(false);
+    if (G.dungeon) music.playDungeon(G.dungeon.depthIndex, G.dungeon.isFinal);
+    G.combat = null;
+    G.screen = 'dungeon';
+    render();
+  },
   'combat-continue': () => finishCombat(),
   'cutscene-next': () => advanceCutscene(),
   'cutscene-skip': () => endCutscene(),
