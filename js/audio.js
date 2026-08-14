@@ -19,14 +19,11 @@ let muted = false;
 let musicBus = null;      // everything musical connects here
 let reverbConvolver = null;
 let reverbWet = null;
-let leadBus = null;       // dry lead send
-let leadDelay = null;
-let leadFeedback = null;
-let leadDelayFilter = null;
+let leadBus = null;       // dry lead send (short plucked notes only — no pad, no delay)
 
 export function isMuted() { return muted; }
 
-function makeImpulse(duration = 1.6, decay = 3.2) {
+function makeImpulse(duration = 0.9, decay = 3.6) {
   const rate = ctx.sampleRate;
   const length = Math.max(1, Math.floor(rate * duration));
   const impulse = ctx.createBuffer(2, length, rate);
@@ -54,21 +51,21 @@ export function initAudio() {
     sfxGain.gain.value = 0.7;
     sfxGain.connect(masterGain);
 
-    // Music bus fans out to a dry path and a light convolution-reverb send for space —
-    // kept short and quiet so it adds air without turning into a wash.
+    // Music bus fans out to a dry path and a very faint convolution-reverb send — just
+    // enough to take the edge off, with nothing left to ring or wash out.
     musicBus = ctx.createGain();
     musicBus.gain.value = 1;
     musicBus.connect(musicGain);
     reverbConvolver = ctx.createConvolver();
     reverbConvolver.buffer = makeImpulse();
     reverbWet = ctx.createGain();
-    reverbWet.gain.value = 0.14;
+    reverbWet.gain.value = 0.06;
     musicBus.connect(reverbConvolver);
     reverbConvolver.connect(reverbWet);
     reverbWet.connect(musicGain);
 
-    // Lead voice gets a warm lowpass (so it never sounds like a raw beep) and a very
-    // subtle, low-feedback delay for a touch of space — not a repeating echo texture.
+    // Lead voice: a warm lowpass so notes read as soft plucks/beeps rather than raw
+    // beeps, straight to the bus — no delay, nothing left hanging in the air.
     leadBus = ctx.createGain();
     leadBus.gain.value = 1;
     const leadToneFilter = ctx.createBiquadFilter();
@@ -77,18 +74,6 @@ export function initAudio() {
     leadToneFilter.Q.value = 0.2;
     leadBus.connect(leadToneFilter);
     leadToneFilter.connect(musicBus);
-    leadDelay = ctx.createDelay(1.2);
-    leadDelay.delayTime.value = 0.32;
-    leadDelayFilter = ctx.createBiquadFilter();
-    leadDelayFilter.type = 'lowpass';
-    leadDelayFilter.frequency.value = 1600;
-    leadFeedback = ctx.createGain();
-    leadFeedback.gain.value = 0.16;
-    leadBus.connect(leadDelay);
-    leadDelay.connect(leadDelayFilter);
-    leadDelayFilter.connect(leadFeedback);
-    leadFeedback.connect(leadDelay);
-    leadDelay.connect(musicBus);
 
     try { muted = localStorage.getItem(MUTE_KEY) === '1'; } catch (e) { muted = false; }
     masterGain.gain.value = muted ? 0 : 1;
@@ -249,42 +234,6 @@ function seventhSemi(scale, degree) {
   return scale[((i % 7) + 7) % 7] + oct * 12;
 }
 
-// ---------- pad voice (crossfaded on chord changes; mid-register only — no sub-bass,
-// no tight dissonant clusters, so nothing here can turn into a droning hum) ----------
-
-function createPadVoice(freqs, filterFreq, level) {
-  const gain = ctx.createGain();
-  gain.gain.value = 0.0001;
-  const filter = ctx.createBiquadFilter();
-  filter.type = 'lowpass';
-  filter.frequency.value = filterFreq;
-  filter.Q.value = 0.25;
-  gain.connect(filter);
-  filter.connect(musicBus);
-  const oscs = freqs.map((f, i) => {
-    const o = ctx.createOscillator();
-    o.type = i === 0 ? 'sine' : 'triangle';
-    o.frequency.value = f;
-    o.detune.value = (Math.random() - 0.5) * 3;
-    const og = ctx.createGain();
-    og.gain.value = 1 / (i + 1.5);
-    o.connect(og); og.connect(gain);
-    o.start();
-    return o;
-  });
-  return {
-    fadeIn(dur) {
-      gain.gain.cancelScheduledValues(ctx.currentTime);
-      gain.gain.setTargetAtTime(level, ctx.currentTime, dur / 3);
-    },
-    fadeOut(dur) {
-      gain.gain.cancelScheduledValues(ctx.currentTime);
-      gain.gain.setTargetAtTime(0.0001, ctx.currentTime, dur / 3);
-      setTimeout(() => { oscs.forEach((o) => { try { o.stop(); } catch (e) { /* already stopped */ } }); }, dur * 1000 + 300);
-    },
-  };
-}
-
 function kickAt(time, peak) {
   if (!ctx) return;
   const osc = ctx.createOscillator();
@@ -326,17 +275,14 @@ let combatIntensity = false;
 // tune" instead of noise.
 const MELODY_PATTERN = [0, 2, 1, 2, 0, 1, 2, 1];
 
+// Tracks harmonic movement for the bass/melody to follow — no audible sustained voice
+// here at all, just bookkeeping, so nothing rings between the percussive hits.
 function changeChord(state, time) {
   state.chordIdx = (state.chordIdx + 1) % state.progression.length;
   const degree = state.progression[state.chordIdx];
   const triad = triadSemis(state.scale, degree).map((s) => state.chordRootFreq * Math.pow(2, s / 12));
   const seventh = state.chordRootFreq * Math.pow(2, seventhSemi(state.scale, degree) / 12);
   state.currentChordFreqs = [...triad, seventh];
-  const filterFreq = 1500 - state.t * 350;
-  const newPad = createPadVoice(triad, filterFreq, 0.13 + state.t * 0.02);
-  newPad.fadeIn(1.3);
-  if (state.padVoice) state.padVoice.fadeOut(1.1);
-  state.padVoice = newPad;
 }
 
 // Ambient theme: soft triad pad, a short plucked (never sustained) bass quarter-note,
@@ -424,7 +370,6 @@ function schedulerTick() {
 
 function stopComposition() {
   if (schedulerTimer) { clearInterval(schedulerTimer); schedulerTimer = null; }
-  if (compositionState?.padVoice) compositionState.padVoice.fadeOut(0.8);
   compositionState = null;
   currentKey = null;
 }
@@ -447,11 +392,9 @@ function startComposition(t, seed, key, opts = {}) {
   const bpm = 64 + t * 22;
   const secondsPer16th = (60 / bpm) / 4;
 
-  if (leadDelay) leadDelay.delayTime.setTargetAtTime((60 / bpm) * 0.75, ctx.currentTime, 0.1);
-
   compositionState = {
     step: 0, chordIdx: -1, arpStep: 0,
-    padVoice: null, currentChordFreqs: [chordRootFreq, chordRootFreq, chordRootFreq],
+    currentChordFreqs: [chordRootFreq, chordRootFreq, chordRootFreq],
     rng, mode, scale, progression, chordRootFreq, bassFreq, bpm, secondsPer16th, t, key,
     engine: 'ambient', spooky: !!opts.spooky,
   };
@@ -476,11 +419,9 @@ function startBossComposition(seed, key, ferocity) {
   const bpm = 92 + ferocity * 36;
   const secondsPer16th = (60 / bpm) / 4;
 
-  if (leadDelay) leadDelay.delayTime.setTargetAtTime((60 / bpm) * 0.5, ctx.currentTime, 0.08);
-
   compositionState = {
     step: 0, chordIdx: -1, arpStep: 0,
-    padVoice: null, currentChordFreqs: [chordRootFreq, chordRootFreq, chordRootFreq],
+    currentChordFreqs: [chordRootFreq, chordRootFreq, chordRootFreq],
     rng, scale, progression, chordRootFreq, bassFreq, bpm, secondsPer16th,
     t: 1, ferocity, engine: 'boss', key,
   };

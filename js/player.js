@@ -59,7 +59,7 @@ export function baseStats(level) {
     allRes: 0,
     dodge: 3,
     maxMana: 20 + level * 3,
-    manaRegen: 8,
+    manaRegen: 3,
   };
 }
 
