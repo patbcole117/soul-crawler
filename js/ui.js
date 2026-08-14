@@ -39,13 +39,19 @@ function statDeltaRows(item, compareItem) {
   }).join('');
 }
 
-export function itemDetailHTML(item, { canEquip = true, equipped = false, compareItem = null } = {}) {
+export function itemDetailHTML(item, { canEquip = true, equipped = false, compareItem = null, shopPrice = null, affordable = true } = {}) {
   const rarity = rarityOf(item);
   const showCompare = !equipped && compareItem && compareItem.id !== item.id;
   const statsHTML = showCompare
     ? `<div class="item-detail-stats compare">${statDeltaRows(item, compareItem)}</div>
        <div class="compare-note">vs. equipped: <span style="color:${rarityOf(compareItem).color}">${compareItem.name}</span></div>`
     : `<div class="item-detail-stats">${describeStats(item.stats).map(s => `<div>${s}</div>`).join('')}</div>`;
+  const actionsHTML = shopPrice != null
+    ? `<button class="btn btn-primary" data-action="buy-shop-item" data-item-id="${item.id}" ${affordable ? '' : 'disabled'}>Buy for ${fmt(shopPrice)}g</button>`
+    : (equipped
+        ? `<button class="btn" data-action="unequip" data-slot="${item.slot}">Unequip</button>`
+        : `${canEquip ? `<button class="btn btn-primary" data-action="equip" data-item-id="${item.id}">Equip</button>` : ''}
+           <button class="btn btn-danger" data-action="sell" data-item-id="${item.id}">Sell (${fmt(item.sellValue)}g)</button>`);
   return `<div class="item-detail" style="--rc:${rarity.color}">
     <div class="item-detail-head">
       <span class="item-detail-icon">${SLOT_ICON[item.slot]}</span>
@@ -55,12 +61,7 @@ export function itemDetailHTML(item, { canEquip = true, equipped = false, compar
       </div>
     </div>
     ${statsHTML}
-    <div class="item-detail-actions">
-      ${equipped
-        ? `<button class="btn" data-action="unequip" data-slot="${item.slot}">Unequip</button>`
-        : `${canEquip ? `<button class="btn btn-primary" data-action="equip" data-item-id="${item.id}">Equip</button>` : ''}
-           <button class="btn btn-danger" data-action="sell" data-item-id="${item.id}">Sell (${fmt(item.sellValue)}g)</button>`}
-    </div>
+    <div class="item-detail-actions">${actionsHTML}</div>
   </div>`;
 }
 
@@ -131,11 +132,11 @@ export function skillRowHTML(spell, rank, canLearn, lockReason) {
   </div>`;
 }
 
-export function shopStockCardHTML(item, gold) {
+export function shopStockCardHTML(item, gold, selected = false) {
   const rarity = rarityOf(item);
   const price = buyPrice(item);
   const affordable = gold >= price;
-  return `<div class="item-card shop-stock-card rarity-${item.rarity}" style="--rc:${rarity.color}">
+  return `<div class="item-card shop-stock-card rarity-${item.rarity} ${selected ? 'selected' : ''}" data-action="select-item" data-item-id="${item.id}" style="--rc:${rarity.color}">
     <div class="item-icon">${SLOT_ICON[item.slot]}</div>
     <div class="item-name">${item.name}</div>
     <div class="item-ilvl">ilvl ${item.ilvl}</div>

@@ -288,6 +288,7 @@ function handleDungeonCleared(index) {
   const p = G.player;
   if (!p.clearedDungeons.includes(index)) p.clearedDungeons.push(index);
   p.unlockedDungeon = Math.max(p.unlockedDungeon, index + 1);
+  p.gambleCost = 100;
   stopDungeonParticles();
   G.dungeon = null;
   persist();
@@ -302,6 +303,7 @@ function handleDungeonCleared(index) {
 
 function handleFinalCleared() {
   G.player.finalCleared = true;
+  G.player.gambleCost = 100;
   stopDungeonParticles();
   G.dungeon = null;
   persist();
@@ -360,14 +362,48 @@ function wheelGradientCSS() {
   return `conic-gradient(${segs.map(s => `${s.color} ${s.start}deg ${s.end}deg`).join(', ')})`;
 }
 
+const RARITY_CONFETTI_COLORS = {
+  common: ['#b7bcc4', '#8a8f99'],
+  uncommon: ['#3ddc84', '#7dffb0'],
+  rare: ['#4d9dff', '#8ad8ff'],
+  epic: ['#c266ff', '#e0a3ff'],
+  legendary: ['#ff9d2f', '#ffcf5c', '#fff2c9'],
+  mythic: ['#ff3d5e', '#ff9dc2', '#fff2c9'],
+};
+
+function playRarityRevealEffects(item) {
+  const canvas = document.getElementById('gamble-confetti');
+  const wrap = document.querySelector('.gamble-wheel-wrap');
+  const colors = RARITY_CONFETTI_COLORS[item.rarity] || RARITY_CONFETTI_COLORS.common;
+  if (canvas) {
+    const vfx = createVfxLayer(canvas);
+    const count = 26 + item.rarityIdx * 16;
+    vfx.confetti(0.5, 0.12, { count, colors, speed: 5 + item.rarityIdx * 0.8 });
+    if (item.rarityIdx >= 4) {
+      setTimeout(() => vfx.confetti(0.25, 0.08, { count: 30, colors, speed: 6 }), 220);
+      setTimeout(() => vfx.confetti(0.75, 0.08, { count: 30, colors, speed: 6 }), 380);
+    }
+  }
+  if (wrap) {
+    const rarity = RARITIES[item.rarityIdx];
+    wrap.style.setProperty('--glow-color', rarity.color);
+    flashEl(wrap, 'gamble-glow');
+  }
+  sfx.loot(item.rarityIdx);
+  if (item.rarityIdx >= 4) setTimeout(() => sfx.levelUp(), 200);
+  else if (item.rarityIdx >= 2) setTimeout(() => sfx.spellBuff(), 150);
+}
+
 function gambleWheelHTML() {
   const g = G.gamble;
   const rotation = g?.rotation || 0;
   const spinning = g?.spinning;
+  const cost = G.player.gambleCost || 100;
   return `<div class="gamble-wheel-wrap">
     <div class="gamble-wheel-pointer">▼</div>
-    <div class="gamble-wheel" style="background:${wheelGradientCSS()}; transform:rotate(${rotation}deg); transition:${spinning ? 'transform 3.2s cubic-bezier(.15,.7,.25,1)' : 'none'}"></div>
-    <button class="btn btn-primary gamble-btn" data-action="gamble-spin" ${(G.player.gold < 100 || spinning) ? 'disabled' : ''}>🎡 Spin for 100g</button>
+    <div class="gamble-wheel" id="gamble-wheel" style="background:${wheelGradientCSS()}; transform:rotate(${rotation}deg); transition:none;"></div>
+    <canvas id="gamble-confetti" class="confetti-canvas"></canvas>
+    <button class="btn btn-primary gamble-btn" data-action="gamble-spin" ${(G.player.gold < cost || spinning) ? 'disabled' : ''}>🎡 Spin for ${fmt(cost)}g</button>
     ${g?.resultItem ? `<div class="gamble-result">${itemCardHTML(g.resultItem, {})}<div class="drop-caption">The wheel favors you!</div></div>` : ''}
   </div>`;
 }
@@ -507,6 +543,13 @@ function renderSelectedDetail() {
       if (p.equipment[slot] && p.equipment[slot].id === G.selectedItemId) { item = p.equipment[slot]; equipped = true; break; }
     }
   }
+  if (!item && p.shop?.stock) {
+    const shopItem = p.shop.stock.find(i => i.id === G.selectedItemId);
+    if (shopItem) {
+      const price = buyPrice(shopItem);
+      return itemDetailHTML(shopItem, { shopPrice: price, affordable: p.gold >= price, compareItem: p.equipment[shopItem.slot] });
+    }
+  }
   if (!item) return '';
   const compareItem = equipped ? null : p.equipment[item.slot];
   return itemDetailHTML(item, { equipped, compareItem });
@@ -563,7 +606,7 @@ function renderShopTab() {
     <div class="shop-section">
       <div class="shop-section-title">Traveling Merchant <button class="btn btn-ghost" data-action="refresh-shop">🔄 Refresh (25g)</button></div>
       <div class="inv-grid shop-stock-grid">
-        ${stock.length ? stock.map(it => shopStockCardHTML(it, p.gold)).join('') : '<div class="empty-note">Sold out. Refresh to restock.</div>'}
+        ${stock.length ? stock.map(it => shopStockCardHTML(it, p.gold, it.id === G.selectedItemId)).join('') : '<div class="empty-note">Sold out. Refresh to restock.</div>'}
       </div>
     </div>
     <div class="shop-section">
@@ -1031,8 +1074,10 @@ const actions = {
   'gamble-spin': () => {
     const p = G.player;
     if (G.gamble?.spinning) return;
-    if (p.gold < 100) { toast('Not enough gold.'); render(); return; }
-    p.gold -= 100;
+    const cost = p.gambleCost || 100;
+    if (p.gold < cost) { toast('Not enough gold.'); render(); return; }
+    p.gold -= cost;
+    p.gambleCost = cost * 2;
     const depth = shopDepth(p);
     const targetIdx = pickRarityIndex(depth, 0.15);
     const segs = wheelSegments();
@@ -1042,10 +1087,24 @@ const actions = {
     const prevRotation = G.gamble?.rotation || 0;
     const prevMod = ((prevRotation % 360) + 360) % 360;
     const delta = spins * 360 + (((360 - landAngle) - prevMod) + 360) % 360;
-    G.gamble = { spinning: true, rotation: prevRotation + delta, resultItem: null, targetIdx };
+    const targetRotation = prevRotation + delta;
+    // Keep `rotation` at its old value for this render so the wheel repaints where it already
+    // was (no visible jump); the actual animated transition is applied directly to the live
+    // DOM node afterward, since a fresh innerHTML render gives CSS nothing to transition from.
+    G.gamble = { spinning: true, rotation: prevRotation, resultItem: null, targetIdx };
     persist();
     sfx.gambleSpin();
     render();
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        const wheelEl = document.getElementById('gamble-wheel');
+        if (wheelEl) {
+          wheelEl.style.transition = 'transform 3.2s cubic-bezier(.15,.7,.25,1)';
+          wheelEl.style.transform = `rotate(${targetRotation}deg)`;
+        }
+        if (G.gamble) G.gamble.rotation = targetRotation;
+      });
+    });
     setTimeout(() => {
       const item = generateItem(depth, { forceRarityIndex: G.gamble.targetIdx, bonusTier: 0.2 });
       G.gamble.spinning = false;
@@ -1056,9 +1115,9 @@ const actions = {
         p.gold += item.sellValue;
         toast(`Inventory full — auto-sold ${item.name} for ${item.sellValue}g`);
       }
-      sfx.loot(item.rarityIdx);
       persist();
       render();
+      playRarityRevealEffects(item);
     }, 3300);
   },
   'enter-dungeon': (btn) => enterDungeon(parseInt(btn.dataset.index, 10), false),
@@ -1148,6 +1207,7 @@ function init() {
     if (!G.player.spellRanks) G.player.spellRanks = {};
     if (typeof G.player.skillPoints !== 'number') G.player.skillPoints = 0;
     if (typeof G.player.mana !== 'number') G.player.mana = 0;
+    if (typeof G.player.gambleCost !== 'number') G.player.gambleCost = 100;
     if (!G.player.classKey) { goClassSelect(); return; }
     clampHp(G.player);
   } else {

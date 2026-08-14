@@ -23,6 +23,7 @@ export function newPlayer(name = 'Wanderer', classKey = 'peasant') {
     finalCleared: false,
     kills: 0,
     shop: null,
+    gambleCost: 100,
   };
   const stats = maxStats(p);
   p.hp = stats.maxHp;

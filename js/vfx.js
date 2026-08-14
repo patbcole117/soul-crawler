@@ -76,9 +76,18 @@ export function createVfxLayer(canvas) {
       p.life -= p.decay;
       ctx.globalAlpha = Math.max(0, p.life);
       ctx.fillStyle = p.color;
-      ctx.beginPath();
-      ctx.arc(p.x, p.y, Math.max(0.4, p.size * p.life), 0, Math.PI * 2);
-      ctx.fill();
+      if (p.rect) {
+        p.rot = (p.rot || 0) + (p.rotSpeed || 0);
+        ctx.save();
+        ctx.translate(p.x, p.y);
+        ctx.rotate(p.rot);
+        ctx.fillRect(-p.size, -p.size * 0.6, p.size * 2, p.size * 1.2);
+        ctx.restore();
+      } else {
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, Math.max(0.4, p.size * p.life), 0, Math.PI * 2);
+        ctx.fill();
+      }
     }
     ctx.globalAlpha = 1;
     raf = (particles.length > 0 || beams.length > 0) ? requestAnimationFrame(loop) : null;
@@ -135,7 +144,27 @@ export function createVfxLayer(canvas) {
     ensureLoop();
   }
 
-  return { burst, smite, resize };
+  function confetti(xFrac, yFrac, opts = {}) {
+    const x = xFrac * canvas.width, y = yFrac * canvas.height;
+    const count = opts.count ?? 40;
+    const colors = opts.colors ?? ['#ffd23d', '#ff9d2f', '#ff3d5e'];
+    const baseSpeed = opts.speed ?? 5;
+    for (let i = 0; i < count; i++) {
+      const angle = -Math.PI / 2 + (Math.random() - 0.5) * Math.PI * 0.95;
+      const speed = baseSpeed * (0.5 + Math.random() * 0.9);
+      particles.push({
+        x, y, vx: Math.cos(angle) * speed, vy: Math.sin(angle) * speed,
+        life: 1, decay: 0.007 + Math.random() * 0.006,
+        size: 2.5 + Math.random() * 3,
+        color: colors[Math.floor(Math.random() * colors.length)],
+        gravity: 0.14, drag: 0.985,
+        rect: true, rot: Math.random() * Math.PI * 2, rotSpeed: (Math.random() - 0.5) * 0.35,
+      });
+    }
+    ensureLoop();
+  }
+
+  return { burst, smite, confetti, resize };
 }
 
 export function castVfx(vfx, key, targetFrac) {
